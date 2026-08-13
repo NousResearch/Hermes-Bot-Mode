@@ -42,6 +42,7 @@ import {
   profileColor,
   queryClient,
   relativeTime,
+  ROUTES_AREA,
   ScrollArea,
   Select,
   SelectContent,
@@ -60,6 +61,8 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'hermes-bots'
 const ROSTER_KEY = [ID, 'roster']
 const ROUTINES_KEY = [ID, 'routines']
+const TEAMS_KEY = [ID, 'teams']
+const TEAM_LOG_LIMIT = 200
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
 /** Captured in register() so components can reach plugin storage. */
@@ -71,6 +74,11 @@ const $lastRoster = atom([])
 /** Bot the Routines tile is scoped to. Follows the live gateway profile
  *  (the bot you're actually chatting with) and roster clicks. */
 const $selectedBot = atom('default')
+
+/** Team route selection and local-only, bounded transcripts. */
+const $selectedTeam = atom(null)
+const $teamLogs = atom({})
+const $teamInflight = atom({})
 
 /** Per-bot appearance + display meta, persisted via ctx.storage:
  *  { [botName]: { shape, color, title } } */
@@ -2257,13 +2265,381 @@ function RoutinesPane() {
   })
 }
 
+// ── Teams ───────────────────────────────────────────────────────────────────
+
+function useTeams() {
+  return useQuery({
+    queryKey: TEAMS_KEY,
+    queryFn: () => host.request('profiles.team_list', {}),
+    refetchInterval: 12000,
+    staleTime: 3000
+  })
+}
+
+function teamLogKey(teamId) {
+  return `team-log:${teamId}`
+}
+
+function saveTeamLog(teamId, rows) {
+  const bounded = rows.slice(-TEAM_LOG_LIMIT)
+  $teamLogs.set({ ...$teamLogs.get(), [teamId]: bounded })
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.(teamLogKey(teamId), bounded)).catch(() => undefined)
+  } catch {
+    /* local transcript remains available for this window */
+  }
+  return bounded
+}
+
+function patchTeamReply(payload) {
+  if (!payload?.team_id || !payload.turn_id || !payload.author_profile) {
+    return
+  }
+  const logs = $teamLogs.get()
+  const rows = logs[payload.team_id] || []
+  const index = rows.findIndex(row => row.turnId === payload.turn_id && row.author === payload.author_profile)
+  if (index < 0) {
+    return
+  }
+  const current = rows[index]
+  // Events and the final RPC response contain the same terminal result.
+  // Once committed, ignore duplicates instead of creating a second bubble.
+  if (current.state !== 'pending' && current.taskId === payload.task_id) {
+    return
+  }
+  const next = rows.slice()
+  next[index] = {
+    ...current,
+    body: payload.text || '',
+    state: payload.state === 'completed' ? 'success' : 'error',
+    error: payload.error || '',
+    taskId: payload.task_id || current.taskId,
+    contextId: payload.context_id || current.contextId
+  }
+  saveTeamLog(payload.team_id, next)
+}
+
+function teamTargets(text, members) {
+  const valid = new Set(members)
+  const selected = []
+  let all = false
+  for (const match of text.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
+    const name = match[2].toLowerCase()
+    if (name === 'all') {
+      all = true
+    } else if (valid.has(name) && !selected.includes(name)) {
+      selected.push(name)
+    }
+  }
+  return all || selected.length === 0 ? members.slice() : selected
+}
+
+function TeamRow({ team, onDelete }) {
+  const open = () => {
+    $selectedTeam.set(team.id)
+    host.navigate('/bot-team')
+  }
+  const row = jsxs('button', {
+    type: 'button',
+    onClick: open,
+    className: 'flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-(--chrome-action-hover)',
+    children: [
+      jsx('div', {
+        className: 'flex size-8 shrink-0 items-center justify-center rounded-lg bg-(--chrome-action-hover) text-(--ui-text-secondary)',
+        children: jsx(Codicon, { name: 'organization' })
+      }),
+      jsxs('div', {
+        className: 'min-w-0 flex-1',
+        children: [
+          jsx('div', { className: 'truncate text-[0.8125rem] font-medium', children: team.name }),
+          jsx('div', {
+            className: 'truncate text-xs text-(--ui-text-tertiary)',
+            children: `${team.members.length} members · lead @${team.lead}`
+          })
+        ]
+      })
+    ]
+  })
+  return jsxs(ContextMenu, {
+    children: [
+      jsx(ContextMenuTrigger, { asChild: true, children: row }),
+      jsx(ContextMenuContent, {
+        children: jsx(ContextMenuItem, {
+          onSelect: () => onDelete(team),
+          className: 'text-destructive',
+          children: 'Delete Team'
+        })
+      })
+    ]
+  })
+}
+
+function CreateTeamDialog({ open, onClose, roster, teams }) {
+  const [name, setName] = useState('')
+  const [lead, setLead] = useState('')
+  const [members, setMembers] = useState([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (open) {
+      setName('')
+      setLead(roster[0]?.name || '')
+      setMembers(roster.slice(0, 2).map(bot => bot.name))
+      setError('')
+    }
+  }, [open])
+
+  const toggle = (profile, enabled) => {
+    setMembers(current => enabled ? [...new Set([...current, profile])] : current.filter(name => name !== profile))
+  }
+  const submit = async () => {
+    const id = slugify(name)
+    if (!id || members.length < 2 || !members.includes(lead)) {
+      setError('Choose a name, at least two unique members, and a lead who is a member.')
+      return
+    }
+    if (teams.some(team => team.id === id)) {
+      setError('A Team with this name already exists.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      await host.request('profiles.team_upsert', { team: { id, name: name.trim(), lead, members } })
+      queryClient.invalidateQueries({ queryKey: TEAMS_KEY })
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create Team')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return jsx(Dialog, {
+    open,
+    onOpenChange: value => !value && onClose(),
+    children: jsxs(DialogContent, {
+      children: [
+        jsxs(DialogHeader, {
+          children: [
+            jsx(DialogTitle, { children: 'Create Team' }),
+            jsx(DialogDescription, { children: 'Group existing profiles in one shared conversation.' })
+          ]
+        }),
+        jsxs('div', {
+          className: 'grid gap-4 py-2',
+          children: [
+            jsxs('label', {
+              className: 'grid gap-1.5 text-xs font-medium',
+              children: ['Name', jsx(Input, { value: name, onChange: event => setName(event.target.value), placeholder: 'Launch Team' })]
+            }),
+            jsxs('div', {
+              className: 'grid gap-1.5',
+              children: [
+                jsx('div', { className: 'text-xs font-medium', children: 'Members' }),
+                jsx('div', {
+                  className: 'grid max-h-40 gap-1 overflow-y-auto rounded-md border border-(--ui-stroke-secondary) p-2',
+                  children: roster.map(bot => jsxs('label', {
+                    className: 'flex cursor-pointer items-center gap-2 text-xs',
+                    children: [
+                      jsx(Checkbox, { checked: members.includes(bot.name), onCheckedChange: value => toggle(bot.name, Boolean(value)) }),
+                      jsx('span', { children: displayName(bot, $botMeta.get()[bot.name]) }),
+                      jsx('span', { className: 'text-(--ui-text-quaternary)', children: `@${bot.name}` })
+                    ]
+                  }, bot.name))
+                })
+              ]
+            }),
+            jsxs('label', {
+              className: 'grid gap-1.5 text-xs font-medium',
+              children: [
+                'Lead',
+                jsxs(Select, {
+                  value: lead,
+                  onValueChange: setLead,
+                  children: [
+                    jsx(SelectTrigger, { children: jsx(SelectValue, { placeholder: 'Choose lead' }) }),
+                    jsx(SelectContent, { children: members.map(profile => jsx(SelectItem, { value: profile, children: `@${profile}` }, profile)) })
+                  ]
+                })
+              ]
+            }),
+            error ? jsx('div', { className: 'text-xs text-destructive', children: error }) : null
+          ]
+        }),
+        jsxs(DialogFooter, {
+          children: [
+            jsx(Button, { variant: 'secondary', onClick: onClose, disabled: saving, children: 'Cancel' }),
+            jsx(Button, { onClick: submit, disabled: saving, children: saving ? 'Creating…' : 'Create Team' })
+          ]
+        })
+      ]
+    })
+  })
+}
+
+function TeamBubble({ row }) {
+  const human = row.authorType === 'human'
+  const meta = useValue($botMeta)[row.author]
+  const roster = useValue($lastRoster)
+  const bot = roster.find(item => item.name === row.author) || { name: row.author }
+  return jsx('div', {
+    className: cn('flex', human ? 'justify-end' : 'justify-start'),
+    children: jsxs('div', {
+      className: cn('max-w-[78%] rounded-xl px-3 py-2', human ? 'bg-primary text-primary-foreground' : 'bg-(--chrome-action-hover)'),
+      children: [
+        !human ? jsx('div', { className: 'mb-1 text-[0.6875rem] font-semibold text-(--ui-text-tertiary)', children: `${displayName(bot, meta)} · @${row.author}` }) : null,
+        row.state === 'pending'
+          ? jsxs('div', { className: 'flex items-center gap-2 text-sm text-(--ui-text-tertiary)', children: [jsx(GlyphSpinner, { spinner: 'breathe' }), 'Thinking…'] })
+          : jsx('div', { className: 'whitespace-pre-wrap text-sm leading-6', children: row.body || (row.state === 'error' ? 'No response' : '') }),
+        row.state === 'error' && row.error
+          ? jsx('div', { className: 'mt-1 text-xs text-destructive', children: row.error })
+          : null
+      ]
+    })
+  })
+}
+
+function TeamPage() {
+  const { data, isLoading } = useTeams()
+  const selectedId = useValue($selectedTeam)
+  const logs = useValue($teamLogs)
+  const inflight = useValue($teamInflight)
+  const [text, setText] = useState('')
+  const teams = data?.teams || []
+  const team = teams.find(item => item.id === selectedId) || teams[0]
+  const rows = team ? (logs[team.id] || []) : []
+  const busy = team ? Boolean(inflight[team.id]) : false
+
+  useEffect(() => {
+    if (team && selectedId !== team.id) {
+      $selectedTeam.set(team.id)
+    }
+    if (team && !Object.prototype.hasOwnProperty.call($teamLogs.get(), team.id)) {
+      try {
+        Promise.resolve(pluginCtx?.storage?.get?.(teamLogKey(team.id), []))
+          .then(value => saveTeamLog(team.id, Array.isArray(value) ? value : []))
+          .catch(() => saveTeamLog(team.id, []))
+      } catch {
+        saveTeamLog(team.id, [])
+      }
+    }
+  }, [team?.id])
+
+  const send = async () => {
+    const message = text.trim()
+    if (!team || !message || busy) return
+    const turnId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const roomMessageId = `human-${turnId}`
+    const targets = teamTargets(message, team.members)
+    const ordered = team.lead && targets.includes(team.lead)
+      ? [team.lead, ...targets.filter(name => name !== team.lead)]
+      : targets
+    const now = Date.now()
+    saveTeamLog(team.id, [
+      ...rows,
+      { id: roomMessageId, turnId, authorType: 'human', author: 'human', body: message, createdAt: now, state: 'success' },
+      ...ordered.map((profile, index) => ({
+        id: `${turnId}:${profile}`,
+        turnId,
+        authorType: 'profile',
+        author: profile,
+        body: '',
+        createdAt: now + index + 1,
+        state: 'pending'
+      }))
+    ])
+    $teamInflight.set({ ...$teamInflight.get(), [team.id]: turnId })
+    setText('')
+    try {
+      const result = await host.request('profiles.peer_fanout', {
+        team_id: team.id,
+        from_profile: team.lead,
+        targets: ordered,
+        message,
+        turn_id: turnId,
+        room_message_id: roomMessageId
+      })
+      for (const reply of result?.results || []) patchTeamReply(reply)
+    } catch (err) {
+      const error = err instanceof Error ? err.message : 'Team request failed'
+      const current = $teamLogs.get()[team.id] || []
+      saveTeamLog(team.id, current.map(row => row.turnId === turnId && row.state === 'pending' ? { ...row, state: 'error', error } : row))
+    } finally {
+      const next = { ...$teamInflight.get() }
+      delete next[team.id]
+      $teamInflight.set(next)
+    }
+  }
+
+  if (isLoading) return jsx('div', { className: 'flex h-full items-center justify-center', children: jsx(GlyphSpinner, { spinner: 'breathe' }) })
+  if (!team) return jsx(EmptyState, { icon: 'organization', title: 'No Teams', description: 'Create a Team from the Bots pane.' })
+
+  return jsxs('div', {
+    className: 'flex h-full min-h-0 flex-col',
+    children: [
+      jsxs('header', {
+        className: 'border-b border-(--ui-stroke-secondary) px-5 py-3',
+        children: [
+          jsx('h1', { className: 'text-base font-semibold', children: team.name }),
+          jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: `Lead @${team.lead} · ${team.members.map(name => `@${name}`).join(', ')}` })
+        ]
+      }),
+      jsx(ScrollArea, {
+        className: 'min-h-0 flex-1',
+        children: rows.length
+          ? jsx('div', { className: 'mx-auto grid w-full max-w-3xl gap-3 px-5 py-5', children: rows.map(row => jsx(TeamBubble, { row }, row.id)) })
+          : jsx(EmptyState, { icon: 'comment-discussion', title: 'Start the Team conversation', description: 'Plain messages go to everyone. Use @member to target profiles or @all for everyone.' })
+      }),
+      jsxs('div', {
+        className: 'border-t border-(--ui-stroke-secondary) p-3',
+        children: [
+          jsx('div', { className: 'mx-auto mb-1.5 max-w-3xl text-[0.6875rem] text-(--ui-text-quaternary)', children: 'Final replies only · transcript is stored locally on this device' }),
+          jsxs('div', {
+            className: 'mx-auto flex max-w-3xl items-end gap-2',
+            children: [
+              jsx(Textarea, {
+                value: text,
+                onChange: event => setText(event.target.value),
+                onKeyDown: event => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    void send()
+                  }
+                },
+                disabled: busy,
+                placeholder: busy ? 'Waiting for Team replies…' : 'Message the Team…',
+                className: 'min-h-16 resize-none'
+              }),
+              jsx(Button, { onClick: () => void send(), disabled: busy || !text.trim(), children: busy ? jsx(GlyphSpinner, { spinner: 'breathe' }) : 'Send' })
+            ]
+          })
+        ]
+      })
+    ]
+  })
+}
+
 // ── roster pane ──────────────────────────────────────────────────────────────
 
 function BotsPane() {
   const { data, error, isLoading, refetch } = useRoster()
+  const { data: teamData, refetch: refetchTeams } = useTeams()
   const [createOpen, setCreateOpen] = useState(false)
+  const [teamCreateOpen, setTeamCreateOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const roster = data?.profiles ?? []
+  const teams = teamData?.teams ?? []
+  const deleteTeam = async team => {
+    try {
+      await host.request('profiles.team_delete', { team_id: team.id })
+      if ($selectedTeam.get() === team.id) $selectedTeam.set(null)
+      await refetchTeams()
+    } catch (err) {
+      host.notify({ kind: 'error', message: err instanceof Error ? err.message : 'Could not delete Team' })
+    }
+  }
   $lastRoster.set(roster)
   mergeServerMeta(roster)
   pullServerAvatars(roster)
@@ -2313,6 +2689,30 @@ function BotsPane() {
                   children: roster.map(bot => jsx(BotRow, { bot, onEdit: setEditing }, bot.name))
                 })
               }),
+      jsxs('div', {
+        className: 'border-t border-(--ui-stroke-secondary)',
+        children: [
+          jsxs('div', {
+            className: 'flex items-center justify-between px-2.5 pt-2.5 pb-1',
+            children: [
+              jsx('span', { className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)', children: 'Teams' }),
+              jsx(Tip, {
+                label: roster.length < 2 ? 'Create at least two agents first' : 'New Team',
+                children: jsx('button', {
+                  type: 'button',
+                  disabled: roster.length < 2,
+                  onClick: () => setTeamCreateOpen(true),
+                  className: 'flex size-6 items-center justify-center rounded-md text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) disabled:opacity-40',
+                  children: jsx(Codicon, { name: 'add' })
+                })
+              })
+            ]
+          }),
+          teams.length
+            ? jsx('div', { className: 'grid max-h-44 gap-0.5 overflow-y-auto px-1.5 pb-2', children: teams.map(team => jsx(TeamRow, { team, onDelete: deleteTeam }, team.id)) })
+            : jsx('div', { className: 'px-3 pb-3 text-xs text-(--ui-text-quaternary)', children: 'Group existing agents in one conversation.' })
+        ]
+      }),
       jsx('div', {
         className: 'border-t border-(--ui-stroke-secondary) p-2',
         children: jsxs(Button, {
@@ -2321,6 +2721,15 @@ function BotsPane() {
           onClick: () => setCreateOpen(true),
           children: [jsx(Codicon, { name: 'add' }), 'New Agent']
         })
+      }),
+      jsx(CreateTeamDialog, {
+        open: teamCreateOpen,
+        roster,
+        teams,
+        onClose: () => {
+          setTeamCreateOpen(false)
+          void refetchTeams()
+        }
       }),
       jsx(CreateAgentDialog, {
         open: createOpen,
@@ -2388,6 +2797,19 @@ export default {
       data: { placement: 'left', width: '260px' },
       render: () => jsx(BotsPane, {})
     })
+
+    ctx.register({
+      id: 'team-page',
+      area: ROUTES_AREA,
+      data: { path: '/bot-team' },
+      render: () => jsx(TeamPage, {})
+    })
+
+    // Team replies are final-only. The RPC result is also applied as a
+    // fallback for clients that reconnect after an event; patchTeamReply is
+    // idempotent across both delivery paths.
+    const disposeTeamEvents = host.onEvent('team.message', event => patchTeamReply(event.payload))
+    ctx.onDispose(disposeTeamEvents)
 
     // Routines — its OWN tiling pane splitting the workspace's right edge
     // (NOT the collapsible right sidebar; placement 'right' is that sidebar's
