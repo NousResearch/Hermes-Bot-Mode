@@ -11,8 +11,10 @@
  * bot you're currently chatting with — follows the live gateway profile.
  *
  * Bots message each other via each bot's persistent "Agent Inbox" chat
- * (`hermes -p <bot> chat -c "Agent Inbox" -q ...`); @-mentions in any chat
- * become explicit handoffs via composer middleware.
+ * (`hermes -p <bot> chat -c "Agent Inbox" -q ...`; `-c` resumes an existing
+ * titled session, so the first handoff to a bot requires bootstrapping the
+ * inbox once — see the SOUL template); @-mentions in any chat become explicit
+ * handoffs via composer middleware.
  */
 
 import {
@@ -1122,9 +1124,15 @@ function composeSoul({ name, title, description, roster, customSoul }) {
     'hermes -p <agent-name> chat -c "Agent Inbox" -q "[Message from agent \'' + name + '\'] your message"',
     '```',
     '',
-    '(`-c "Agent Inbox"` appends to that named conversation, creating it on',
-    'first use — never a throwaway session. Always open with the',
-    "[Message from agent '" + name + "'] prefix so they know who is talking.)",
+    '(`-c "Agent Inbox"` appends to that named conversation — but it only',
+    'resumes an existing one. On first use the inbox does not exist yet, so',
+    'the command fails with `No session found matching Agent Inbox`. Create',
+    'it once: run `hermes -p <agent-name> chat -q "Agent Inbox bootstrap"`,',
+    'then find the new session id in `hermes -p <agent-name> sessions list`',
+    'and run `hermes -p <agent-name> sessions rename <session-id> "Agent Inbox"`.',
+    'After that, `-c "Agent Inbox"` always works. Never use a throwaway',
+    "session. Always open with the [Message from agent '" + name + "'] prefix",
+    'so they know who is talking.)',
     'Their reply prints to stdout — relay the relevant part back to the user,',
     'and mention it came from that agent.',
     '',
@@ -2731,8 +2739,12 @@ export default {
 
           const note =
             `\n\n[@mention handoff: deliver the message above to ${mentioned.map(n => `agent '${n}'`).join(' and ')} ` +
-            `via \`hermes -p <agent> chat -c "Agent Inbox" -q "..."\` (prefix it "[Message from agent '<your-name>']"), ` +
-            `wait for the reply, and report it back.]`
+            `via \`hermes -p <agent> chat -c "Agent Inbox" -q "..."\` (prefix it "[Message from agent '<your-name>']"). ` +
+            `If the command fails with "No session found matching 'Agent Inbox'", the inbox does not exist yet — ` +
+            `create it once with \`hermes -p <agent> chat -q "Agent Inbox bootstrap"\`, find the new session id ` +
+            `via \`hermes -p <agent> sessions list\`, then \`hermes -p <agent> sessions rename <session-id> "Agent Inbox"\`, ` +
+            `and re-run the delivery command. ` +
+            `Wait for the reply, and report it back.]`
 
           return { ...draft, text: text + note }
         }

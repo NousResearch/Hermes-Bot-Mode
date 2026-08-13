@@ -25,7 +25,7 @@ A bot **is** a Hermes profile — isolated config, memory, skills, credentials, 
 - Creation/editing rides the `profiles.*` gateway RPCs (`list`, `create`, `describe`, `configure`).
 - Avatar generation uses the `image.generate` RPC and works over both local and remote gateways (results return as data URLs).
 - Routines are plain Hermes cron jobs namespaced `[bot:<name>] <routine>` — they also show up in `hermes cron list` and the core Cron page.
-- Bot-to-bot messages are real CLI handoffs: `hermes -p <bot> chat -c "Agent Inbox" -q "..."`.
+- Bot-to-bot messages are real CLI handoffs: `hermes -p <bot> chat -c "Agent Inbox" -q "..."`. The inbox is created on first use — if the command fails with `No session found matching 'Agent Inbox'`, bootstrap it once with `hermes -p <bot> chat -q "Agent Inbox bootstrap"`, find the new session id in `hermes -p <bot> sessions list`, and `hermes -p <bot> sessions rename <session-id> "Agent Inbox"`.
 
 No core patches, no background daemons, no extra storage: everything is standard Hermes surface.
 
