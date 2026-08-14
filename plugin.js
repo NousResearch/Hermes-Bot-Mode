@@ -211,12 +211,14 @@ async function duplicateBot(bot, roster) {
     description: bot.description || ''
   })
 
-  // Same look: avatar shape/color/image, pet, and a "(copy)" title so the
-  // two are tellable apart in the roster until the user renames.
+  // Same look: avatar shape/color/image and a "(copy)" title so the two
+  // are tellable apart in the roster until the user renames. Do not copy
+  // chat or created. Those belong to the original bot.
   const meta = $botMeta.get()[base]
   if (meta) {
+    const { chat, created, ...look } = meta
     saveBotMeta(name, {
-      ...meta,
+      ...look,
       title: meta.title ? `${meta.title} (copy)` : ''
     })
   }
