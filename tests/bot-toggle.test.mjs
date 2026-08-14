@@ -60,7 +60,7 @@ function load({ profiles = [], jobs = [] } = {}) {
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
-    .concat('\nglobalThis.__toggle = { setBotEnabled, routineBot };')
+    .concat('\nglobalThis.__toggle = { setBotEnabled, routineBot, upgradeSoulProtocol };')
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
 
   const register = () => {
@@ -137,4 +137,34 @@ test('regression: each roster row renders an on/off switch wired to setBotEnable
 test('regression: newly created bots default to ON (create flow writes no enabled flag)', () => {
   assert.match(pluginSource, /saveBotMeta\(slug, \{ shape, color, image, title: title\.trim\(\), created: Date\.now\(\) \}\)/)
   assert.doesNotMatch(pluginSource, /saveBotMeta\(slug, \{[^}]*enabled/)
+})
+
+test('unit: protocol v2 teaches bots the on/off toggle', () => {
+  const { __toggle } = load({})
+  const next = __toggle.upgradeSoulProtocol('# Researcher\n\nCustom body.', 'researcher', [{ name: 'writer' }])
+  assert.match(next, /hermes-bots-protocol:2/)
+  assert.match(next, /ON\/OFF STATE/)
+  assert.match(next, /enabled: false/)
+  assert.match(next, /profile\.yaml/)
+})
+
+test('unit: upgradeSoulProtocol replaces the old section, preserving the custom body', () => {
+  const { __toggle } = load({})
+  const old = '# Researcher\n\nMy custom persona.\n\n## Messaging other agents\n\nOld protocol instructions with a stale teammate list.'
+  const next = __toggle.upgradeSoulProtocol(old, 'researcher', [{ name: 'writer' }])
+  assert.match(next, /My custom persona/)
+  assert.match(next, /hermes-bots-protocol:2/)
+  assert.doesNotMatch(next, /stale teammate list/)
+})
+
+test('unit: upgradeSoulProtocol appends when no section exists and is idempotent', () => {
+  const { __toggle } = load({})
+  const plain = '# Bot\n\nJust a soul.'
+  const v2 = __toggle.upgradeSoulProtocol(plain, 'bot', [])
+  assert.match(v2, /hermes-bots-protocol:2/)
+  assert.equal(__toggle.upgradeSoulProtocol(v2, 'bot', []), v2)
+})
+
+test('regression: roster load triggers the protocol upgrade pass', () => {
+  assert.match(pluginSource, /upgradeBotProtocols\(live\)/)
 })

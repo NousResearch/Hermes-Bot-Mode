@@ -1375,6 +1375,7 @@ function messagingProtocolSection(name, roster) {
   const teammates = (roster || []).filter(b => b.name !== name)
 
   return [
+    '<!-- hermes-bots-protocol:2 -->',
     '## Messaging other agents',
     '',
     'You work alongside other named agents. Every agent (including you) has',
@@ -1404,6 +1405,20 @@ function messagingProtocolSection(name, roster) {
     'reaches them via their own delivery — and use the same command if you',
     'need to start a conversation yourself.',
     '',
+    'ON/OFF STATE: the user can switch any agent (including you) OFF with the',
+    'toggle in the Bots roster. An OFF agent has its routines paused and must',
+    'not take on new work. Before messaging a teammate, verify they are ON:',
+    'read `$HERMES_HOME/profiles/<name>/profile.yaml` (or',
+    '`~/.hermes/profiles/<name>/profile.yaml`). If it contains `enabled: false`',
+    'under `ui_meta.hermes-bots`, the teammate is OFF — do NOT message them;',
+    'tell the user they are switched off and offer to send once they are',
+    'turned back on. A missing file or missing flag means ON.',
+    '',
+    'If YOU are switched OFF (your own profile.yaml shows `enabled: false`),',
+    'do not start new work or begin new conversations; if a teammate messages',
+    'you anyway, reply briefly that you are switched off and wait for the',
+    'user to turn you back on.',
+    '',
     'When the user writes @<agent-name> or says "ask <name> to ..." /',
     '"tell <name> ...", that is a handoff: message that agent, wait for the',
     'reply, and report back.',
@@ -1414,6 +1429,73 @@ function messagingProtocolSection(name, roster) {
       ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`)
       : ['- (none yet)'])
   ].join('\n')
+}
+
+/** Version marker for the agent-messaging protocol — lets the roster
+ *  migration tell v1 (no toggle awareness) from v2 without parsing text. */
+const PROTOCOL_MARKER = '<!-- hermes-bots-protocol:2 -->'
+
+/** Ensure a SOUL carries the CURRENT protocol section: replace an old
+ *  section when present, otherwise append. Idempotent via the marker. */
+function upgradeSoulProtocol(soul, name, roster) {
+  if (!soul || soul.includes(PROTOCOL_MARKER)) {
+    return soul
+  }
+
+  const section = messagingProtocolSection(name, roster)
+  const idx = soul.lastIndexOf('## Messaging other agents')
+
+  if (idx >= 0) {
+    return soul.slice(0, idx).trimEnd() + '\n\n' + section
+  }
+
+  return soul.trimEnd() + '\n\n' + section
+}
+
+/** One describe per bot per session; bots checked (or upgraded) are not
+ *  re-checked until the app restarts. */
+const protocolUpgradeChecked = new Set()
+
+/** Bring every roster bot's SOUL up to the current messaging protocol
+ *  (v2: on/off toggle awareness). Preserves custom SOUL bodies — the
+ *  protocol is replaced/appended, never edits persona text. */
+function upgradeBotProtocols(roster) {
+  const pending = []
+
+  for (const bot of roster) {
+    if (protocolUpgradeChecked.has(bot.name)) {
+      continue
+    }
+
+    protocolUpgradeChecked.add(bot.name)
+    pending.push(
+      host
+        .request('profiles.describe', { name: bot.name })
+        .then(res => {
+          const current = res?.soul || ''
+          const next = upgradeSoulProtocol(current, bot.name, roster)
+          return next === current
+            ? null
+            : host.request('profiles.configure', { name: bot.name, soul: next }).then(() => bot.name)
+        })
+        .catch(() => null)
+    )
+  }
+
+  if (!pending.length) {
+    return
+  }
+
+  Promise.allSettled(pending).then(results => {
+    const upgraded = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)
+
+    if (upgraded.length) {
+      host.notify({
+        kind: 'success',
+        message: `Team protocol updated — ${upgraded.length} bot${upgraded.length === 1 ? '' : 's'} now recognize the on/off toggle.`
+      })
+    }
+  })
 }
 
 /** SOUL.md for a new bot: identity (or the user's custom SOUL) + the
@@ -3191,6 +3273,7 @@ function BotsPane() {
     $lastRoster.set(roster)
     mergeServerMeta(live)
     pullServerAvatars(live)
+    upgradeBotProtocols(live)
     trackInboundActivity(live)
 
     // Pre-dial each bot's gateway socket so the first click doesn't pay
@@ -3470,7 +3553,7 @@ export default {
           const senderName = displayName({ name: active, title: activeMeta?.title }, activeMeta)
           const note =
             '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
-            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
+            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Before sending, check the recipient is not switched off (read $HERMES_HOME/profiles/<name>/profile.yaml — if it shows enabled: false under ui_meta.hermes-bots, do NOT send; report back that they are OFF). Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
             mentioned.map(n => '`hermes -p ' + n + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + senderName + ' (@' + botHandle(active) + '): <your composed message>"`').join('\n') +
             '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
             'Relay the reply back to the user, attributed to that agent.]'

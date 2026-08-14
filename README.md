@@ -66,7 +66,7 @@ Then reload plugins in the Hermes desktop app (Ctrl+K → "Reload desktop plugin
 - Deleting a profile is intentionally not exposed in the UI; use `hermes profile delete <name>`.
 - Bot-to-bot delivery is per-invocation (the receiving bot sees the message in its inbox when it next runs); live interrupt of a mid-conversation bot is upstream future work.
 - Avatar/pet customizations are stored in plugin storage; the profile itself stays clean.
-- Toggling a bot off pauses its `[bot:<name>]` cron jobs and excludes it from @-mention handoffs; the state rides the same bot meta as the avatar, so it follows the profile across machines.
+- Toggling a bot off pauses its `[bot:<name>]` cron jobs and excludes it from @-mention handoffs; the state rides the same bot meta as the avatar, so it follows the profile across machines. The agent-messaging protocol (v2) teaches bots the toggle: before messaging a teammate they read `$HERMES_HOME/profiles/<name>/profile.yaml` and skip anyone switched off (roster load upgrades existing bots' SOULs in place).
 
 ## License
 
