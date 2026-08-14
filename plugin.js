@@ -67,6 +67,7 @@ let pluginCtx = null
 
 /** Live roster snapshot for imperative handlers (context menus). */
 const $lastRoster = atom([])
+const $hasRosterSnapshot = atom(false)
 
 /** Bot the Routines tile is scoped to. Follows the live gateway profile
  *  (the bot you're actually chatting with) and roster clicks. */
@@ -1070,6 +1071,28 @@ function PetTab({ image, onImage }) {
 
 // ── data ─────────────────────────────────────────────────────────────────────
 
+function rosterErrorText(error) {
+  return error instanceof Error ? error.message : String(error || 'gateway error')
+}
+
+function isProfilesListUnsupported(error) {
+  const message = rosterErrorText(error)
+  return /(?:unknown|unsupported).*(?:method|rpc)?.*profiles\.list|profiles\.list.*(?:unknown|unsupported)/i.test(message)
+}
+
+function rosterRefreshNotice(error) {
+  if (isProfilesListUnsupported(error)) {
+    return 'This gateway does not support profiles.list. Showing your last successful Bot roster.'
+  }
+  return `Roster refresh failed: ${rosterErrorText(error)}. Showing your last successful Bot roster.`
+}
+
+function rosterUnavailableMessage(error) {
+  if (isProfilesListUnsupported(error)) {
+    return 'This gateway does not support profiles.list. Bot Mode cannot refresh the roster from this gateway.'
+  }
+  return `Roster unavailable: ${rosterErrorText(error)}. Retry now while the gateway reconnects.`
+}
 function useRoster() {
   return useQuery({
     queryKey: ROSTER_KEY,
@@ -2575,11 +2598,16 @@ function BotsPane() {
       void refetch()
     }
   }, [gatewayUp, refetch])
-  const roster = data?.profiles ?? []
-  $lastRoster.set(roster)
-  mergeServerMeta(roster)
-  pullServerAvatars(roster)
-
+  const liveRoster = Array.isArray(data?.profiles) ? data.profiles : null
+  if (liveRoster) {
+    $lastRoster.set(liveRoster)
+    $hasRosterSnapshot.set(true)
+    mergeServerMeta(liveRoster)
+    pullServerAvatars(liveRoster)
+  }
+  const hasRosterSnapshot = $hasRosterSnapshot.get()
+  const roster = liveRoster ?? (hasRosterSnapshot ? $lastRoster.get() : [])
+  const fallbackNotice = error && hasRosterSnapshot ? rosterRefreshNotice(error) : null
   return jsxs('div', {
     className: 'flex h-full flex-col',
     children: [
@@ -2602,18 +2630,24 @@ function BotsPane() {
           })
         ]
       }),
-      isLoading
+      fallbackNotice
+        ? jsx('div', {
+            className: 'mx-2.5 mb-1 rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-xs text-(--ui-text-tertiary)',
+            children: fallbackNotice
+          })
+        : null,
+      isLoading && !hasRosterSnapshot
         ? jsx('div', {
             className: 'flex flex-1 items-center justify-center',
             children: jsx(GlyphSpinner, { spinner: 'breathe', className: 'text-(--ui-text-tertiary)' })
           })
-        : error
+        : error && !hasRosterSnapshot
           ? jsxs('div', {
               className: 'grid gap-2 px-3 py-4 text-xs text-(--ui-text-tertiary)',
               children: [
                 jsx('div', {
                   children: gatewayUp
-                    ? `Roster unavailable: ${error instanceof Error ? error.message : 'gateway error'}. If your gateway predates profiles.list, update Hermes and restart the gateway.`
+                    ? rosterUnavailableMessage(error)
                     : 'Waiting for the gateway connection… (remote gateways can take a few seconds; retries automatically)'
                 }),
                 jsx(Button, {
