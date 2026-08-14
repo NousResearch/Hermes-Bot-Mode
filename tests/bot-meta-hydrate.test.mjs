@@ -19,7 +19,10 @@ function load(storageGet) {
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
     host: {
       request: async () => ({}),
-      state: { profile: { listen: () => undefined } }
+      state: {
+        profile: { listen: () => undefined },
+        gateway: { listen: () => undefined }
+      }
     }
   }
   const source = pluginSource

@@ -8,7 +8,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 
 ## What you get
 
-- **Bots pane** — a left-side roster with one row per agent profile: avatar, latest-message preview, and timestamp. Click a bot to land in its chat.
+- **Bots pane** — a left-side roster with one row per agent profile: avatar, latest-message preview, and timestamp. Click a bot to land in its chat, or use **Sessions** from its context menu to browse and filter its 200 most recent stored conversations.
 - **New Agent** — create a bot in seconds: name, title, description. An **Advanced** disclosure opens the full profile config: clone from an existing profile, pin a provider/model, write a custom SOUL.md, skip bundled skills.
 - **Edit Profile** (right-click a bot) — change the avatar, title, and description any time; its own Advanced section edits the live profile: per-skill and per-toolset enablement, model pin, and the full SOUL.md.
 - **Duplicate** (right-click) — full clone of a bot: config, skills, SOUL.md, memory, and its look.
@@ -22,7 +22,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 
 A bot **is** a Hermes profile — isolated config, memory, skills, credentials, and chat history under `~/.hermes/profiles/<name>/`. This plugin is a UI over that primitive:
 
-- Chats open via cross-profile session navigation.
+- Chats and stored-session rows open through profile-aware session navigation. The optional Sessions view filters a selected profile's 200 most recent stored conversations without changing the primary click-to-chat flow.
 - Creation/editing rides the `profiles.*` gateway RPCs (`list`, `create`, `describe`, `configure`).
 - Avatar generation uses the `image.generate` RPC and works over both local and remote gateways (results return as data URLs).
 - Routines are plain Hermes cron jobs namespaced `[bot:<name>] <routine>` — they also show up in `hermes cron list` and the core Cron page.
@@ -59,6 +59,7 @@ Then reload plugins in the Hermes desktop app (Ctrl+K → "Reload desktop plugin
 ### Requirements
 
 - Hermes desktop app with the plugin SDK (any recent build)
+- Profile session browsing requires a Desktop build with `host.openSession(id, { profile })`.
 - The `profiles.*` / `image.generate` gateway RPCs ship in hermes-agent ≥ mid-2026 builds (`hermes update`). The plugin feature-detects older gateways and degrades gracefully — the roster works everywhere; Advanced editing and avatar generation light up when the RPCs exist.
 
 ## Notes

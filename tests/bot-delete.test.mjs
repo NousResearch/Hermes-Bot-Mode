@@ -21,7 +21,10 @@ function load() {
     COMPOSER_AREAS: { middleware: 'middleware' },
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
     host: {
-      state: { profile: { listen: () => undefined } },
+      state: {
+        profile: { listen: () => undefined },
+        gateway: { listen: () => undefined }
+      },
       request: async (method, params) => {
         requests.push({ method, params })
         return method === 'cli.exec' ? { blocked: false, code: 0, output: 'deleted' } : { ok: true }

@@ -16,7 +16,13 @@ function load(request = async () => ({ jobs: [] })) {
   const context = {
     atom, PALETTE_AREA: 'palette', COMPOSER_AREAS: { middleware: 'middleware' },
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
-    host: { request, state: { profile: { listen: () => undefined } } }
+    host: {
+      request,
+      state: {
+        profile: { listen: () => undefined },
+        gateway: { listen: () => undefined }
+      }
+    }
   }
   const source = pluginSource
     .replace(/^import\s+\{[\s\S]*?\}\s+from '@hermes\/plugin-sdk'\r?\n/m, '')

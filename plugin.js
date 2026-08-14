@@ -132,6 +132,17 @@ const $hideBotChats = atom(true)
  *  (the bot you're actually chatting with) and roster clicks. */
 const $selectedBot = atom('default')
 
+/** Optional secondary navigation inside the Bots pane. Primary row clicks still
+ * open the bot's canonical chat; this state opens its stored-session browser. */
+const $botSessionsWorkspace = atom(null)
+const $botSelectedSessions = atom({})
+const $sessionsGatewayGeneration = atom(0)
+
+function handleSessionsGatewayTransition() {
+  $sessionsGatewayGeneration.set($sessionsGatewayGeneration.get() + 1)
+  $botSelectedSessions.set({})
+}
+
 /** Per-bot appearance + display meta, persisted via ctx.storage:
  *  { [botName]: { shape, color, title } } */
 const $botMeta = atom({})
@@ -2471,6 +2482,10 @@ function BotRow({ bot, onDelete, onEdit }) {
             children: meta?.pinned ? 'Unpin' : 'Pin to top'
           }),
           jsx(ContextMenuSeparator, {}),
+          jsx(ContextMenuItem, {
+            onSelect: () => openBotSessionsWorkspace(bot),
+            children: 'Sessions'
+          }),
           jsx(ContextMenuItem, { onSelect: () => onEdit(bot), children: 'Edit Profile' }),
           jsx(ContextMenuItem, {
             onSelect: () => {
@@ -4748,6 +4763,151 @@ function RoutinesPane() {
   })
 }
 
+// ── profile session workspace ────────────────────────────────────────────────
+
+const PROFILE_SESSION_LIST_LIMIT = 200
+
+function openBotSessionsWorkspace(bot) {
+  if (bot?.name && NAME_RE.test(bot.name)) {
+    $botSessionsWorkspace.set(bot.name)
+  }
+}
+
+function filterProfileSessions(sessions, query) {
+  const needle = String(query || '').trim().toLowerCase()
+  const rows = Array.isArray(sessions) ? sessions : []
+  if (!needle) return rows
+  return rows.filter(session =>
+    `${session?.title || ''} ${session?.preview || ''} ${session?.source || ''}`.toLowerCase().includes(needle)
+  )
+}
+
+function useProfileSessions(botName, gatewayGeneration) {
+  return useQuery({
+    queryKey: [ID, 'profile-sessions', botName, gatewayGeneration],
+    enabled: Boolean(botName),
+    queryFn: () => host.request('session.list', { profile: botName, limit: PROFILE_SESSION_LIST_LIMIT }),
+    refetchInterval: 8000,
+    staleTime: 4000,
+    retry: false
+  })
+}
+
+async function openProfileSession(botName, storedId, gatewayGeneration) {
+  const profile = String(botName || '')
+  const id = String(storedId || '')
+  if (!NAME_RE.test(profile) || !id || gatewayGeneration !== $sessionsGatewayGeneration.get()) return
+  if (typeof host.openSession !== 'function') {
+    throw new Error('This Hermes Desktop version cannot open stored sessions')
+  }
+  await host.openSession(id, { profile })
+  if (gatewayGeneration !== $sessionsGatewayGeneration.get()) return
+  $botSelectedSessions.set({ ...$botSelectedSessions.get(), [profile]: id })
+}
+
+function ProfileSessionRow({ session, botName, active, gatewayGeneration }) {
+  return jsxs('button', {
+    type: 'button',
+    'aria-current': active ? 'page' : undefined,
+    onClick: () => void openProfileSession(botName, session.id, gatewayGeneration).catch(err => host.notifyError(err, 'Could not open session')),
+    className: cn(
+      'flex w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left transition-colors',
+      'hover:bg-(--chrome-action-hover)',
+      active && 'bg-(--ui-row-active-background)'
+    ),
+    children: [
+      jsx('span', {
+        className: 'truncate text-[0.8125rem] font-medium',
+        children: session.title || 'Untitled session'
+      }),
+      jsx('div', {
+        className: 'truncate text-[0.7rem] text-(--ui-text-tertiary)',
+        children: session.preview || session.source || 'No messages yet'
+      })
+    ]
+  })
+}
+
+function ProfileSessionsWorkspace({ bot }) {
+  const gatewayGeneration = useValue($sessionsGatewayGeneration)
+  const { data, isLoading, error } = useProfileSessions(bot.name, gatewayGeneration)
+  const selectedByProfile = useValue($botSelectedSessions)
+  const [query, setQuery] = useState('')
+  const sourceSessions = data?.sessions || []
+  const sessions = filterProfileSessions(sourceSessions, query)
+  const inventoryBounded = sourceSessions.length >= PROFILE_SESSION_LIST_LIMIT
+  const selectedId = selectedByProfile[bot.name] || ''
+
+  const header = jsxs('div', {
+    className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
+    children: [
+      jsx(Button, {
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => $botSessionsWorkspace.set(null),
+        children: 'Back'
+      }),
+      jsx('div', {
+        className: 'min-w-0 flex-1 truncate text-sm font-semibold',
+        children: `${displayName(bot, $botMeta.get()[bot.name])} sessions`
+      })
+    ]
+  })
+
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    children: [
+      header,
+      jsx('div', {
+        className: 'px-2 pb-2',
+        children: jsx(Input, {
+          'aria-label': 'Filter sessions',
+          placeholder: 'Filter sessions…',
+          value: query,
+          onChange: event => setQuery(event.target.value)
+        })
+      }),
+      inventoryBounded
+        ? jsx('div', {
+            className: 'px-2.5 pb-2 text-[0.65rem] text-(--ui-text-quaternary)',
+            children: `Showing the ${PROFILE_SESSION_LIST_LIMIT} most recent sessions.`
+          })
+        : null,
+      isLoading
+        ? jsx('div', {
+            className: 'flex flex-1 items-center justify-center',
+            children: jsx(GlyphSpinner, { spinner: 'breathe' })
+          })
+        : error
+          ? jsx('div', {
+              className: 'px-3 py-3 text-xs text-(--ui-text-tertiary)',
+              children: 'Could not load sessions for this profile.'
+            })
+          : jsx(ScrollArea, {
+              className: 'min-h-0 flex-1',
+              children: jsx('div', {
+                className: 'grid gap-0.5 px-1.5 pb-2',
+                children: sessions.length
+                  ? sessions.map(session => jsx(ProfileSessionRow, {
+                      session,
+                      botName: bot.name,
+                      active: selectedId === session.id,
+                      gatewayGeneration
+                    }, session.id))
+                  : jsx('div', {
+                      className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
+                      children: query.trim()
+                        ? inventoryBounded
+                          ? `No matching sessions in the ${PROFILE_SESSION_LIST_LIMIT} most recent.`
+                          : 'No sessions match that filter.'
+                        : 'No stored sessions yet.'
+                    })
+              })
+            })
+    ]
+  })
+}
+
 // ── roster pane ──────────────────────────────────────────────────────────────
 
 function BotsPane() {
@@ -4758,6 +4918,7 @@ function BotsPane() {
   const [deleting, setDeleting] = useState(null)
   const [query, setQuery] = useState('')
   const hideBotChats = useValue($hideBotChats)
+  const sessionsWorkspaceName = useValue($botSessionsWorkspace)
 
   // The socket opening (boot, SSH reconnect, sleep/wake) is the signal to
   // retry immediately instead of waiting out the poll interval.
@@ -4809,6 +4970,11 @@ function BotsPane() {
   const staleNotice = error && !live && roster.length
     ? 'Roster refresh failed — showing the last good list.' + (gatewayUp ? '' : ' Waiting for the gateway to reconnect…')
     : null
+  const sessionsWorkspaceBot = roster.find(bot => bot.name === sessionsWorkspaceName)
+
+  if (sessionsWorkspaceBot) {
+    return jsx(ProfileSessionsWorkspace, { bot: sessionsWorkspaceBot })
+  }
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -5028,6 +5194,7 @@ export default {
         $selectedBot.set(profile)
       }
     })
+    host.state.gateway.listen(handleSessionsGatewayTransition)
 
     ctx.register({
       id: 'pane',
