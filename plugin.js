@@ -1270,22 +1270,7 @@ function BotRow({ bot, onEdit }) {
 
     let id = meta?.chat
 
-    if (id) {
-      // Recovery: compaction rewrites lineage ids. If the pin no longer
-      // resolves, follow the lineage to the newest session that CONTINUES
-      // this chat; if the whole lineage is gone, mint a fresh canonical.
-      try {
-        const res = await host.request('session.list', { profile: bot.name, limit: 100 })
-        const rows = res?.sessions ?? []
-
-        if (rows.length && !rows.some(s => s.id === id)) {
-          id = rows[0].id
-          saveBotMeta(bot.name, { chat: id })
-        }
-      } catch {
-        // Gateway hiccup — try the pin as-is.
-      }
-    } else {
+    if (!id) {
       try {
         id = await createCanonicalChat(bot.name)
 
