@@ -1673,14 +1673,31 @@ function emptyAdvancedState() {
 /** Persist only the dirty sections of the advanced editor. */
 async function applyAdvancedConfig(bot, state) {
   const payload = { name: bot }
+  const applied = {}
 
   if (state.dirtySoul) {
     payload.soul = state.soul
   }
 
-  if (state.dirtyModel && state.model.trim() && state.provider.trim()) {
-    payload.model = state.model.trim()
-    payload.provider = state.provider.trim()
+  if (state.dirtyModel) {
+    const model = state.model.trim()
+    const provider = state.provider.trim()
+
+    if (model && provider) {
+      payload.model = model
+      payload.provider = provider
+    } else if (!model && !provider) {
+      try {
+        const result = await host.request('cli.exec', {
+          argv: ['--profile', bot, 'config', 'unset', 'model']
+        })
+        applied.model = result?.blocked !== true && result?.code === 0
+      } catch {
+        applied.model = false
+      }
+    } else {
+      applied.model = false
+    }
   }
 
   if (state.dirtySkills) {
@@ -1695,10 +1712,13 @@ async function applyAdvancedConfig(bot, state) {
   }
 
   if (Object.keys(payload).length === 1) {
-    return { ok: true, applied: {} }
+    return { ok: Object.values(applied).every(Boolean), applied }
   }
 
-  return host.request('profiles.configure', payload)
+  const result = await host.request('profiles.configure', payload)
+  const merged = { ...applied, ...(result?.applied || {}) }
+
+  return { ...result, ok: Object.values(merged).every(Boolean), applied: merged }
 }
 
 // ── edit profile dialog ──────────────────────────────────────────────────────
@@ -1756,6 +1776,7 @@ function EditProfileDialog({ bot, open, onClose }) {
     }
 
     setBusy(true)
+    let advancedFailed = false
     saveBotMeta(bot.name, { shape, color, image, title: title.trim() })
 
     const desc = description.trim()
@@ -1776,14 +1797,18 @@ function EditProfileDialog({ bot, open, onClose }) {
         const failed = Object.entries(res?.applied || {}).filter(([, ok]) => !ok)
 
         if (failed.length) {
+          advancedFailed = true
           host.notify({ kind: 'error', message: `Some sections failed: ${failed.map(([k]) => k).join(', ')}` })
         }
       } catch (err) {
+        advancedFailed = true
         host.notifyError(err, 'Advanced configuration failed')
       }
     }
 
-    host.notify({ kind: 'success', message: `${displayName(bot, { title })} updated` })
+    if (!advancedFailed) {
+      host.notify({ kind: 'success', message: `${displayName(bot, { title })} updated` })
+    }
     setBusy(false)
     onClose()
   }
