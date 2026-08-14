@@ -2149,6 +2149,10 @@ function normalizedProfileName(profile) {
   return typeof profile === 'string' ? profile.trim().toLowerCase() : ''
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`
+}
+
 function routinePrompt(bot, title, instruction, activeProfile) {
   if (normalizedProfileName(bot) && normalizedProfileName(bot) === normalizedProfileName(activeProfile)) {
     return instruction
@@ -2157,7 +2161,7 @@ function routinePrompt(bot, title, instruction, activeProfile) {
   return (
     `You are running the scheduled routine "${title}" for agent '${bot}'. ` +
     `Execute it AS that agent so the run lands in its own history: run this in the terminal and relay the output:\n\n` +
-    `hermes -p ${bot} chat -c "Routine: ${title}" -q ${JSON.stringify(`[Scheduled routine] ${instruction}`)}\n\n` +
+    `hermes -p ${shellQuote(bot)} chat -c ${shellQuote(`Routine: ${title}`)} -q ${shellQuote(`[Scheduled routine] ${instruction}`)}\n\n` +
     `If the command fails, report the error instead.`
   )
 }

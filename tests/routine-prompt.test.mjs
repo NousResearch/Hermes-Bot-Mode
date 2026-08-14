@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
@@ -36,8 +37,29 @@ test('unit: direct execution is selected for the active bot profile', () => {
 test('integration: a different active profile retains the delegated routine wrapper', () => {
   const { __routines } = load()
   const prompt = __routines.routinePrompt('research', 'Digest', 'Summarize findings', 'default')
-  assert.match(prompt, /hermes -p research chat/)
+  assert.match(prompt, /hermes -p 'research' chat/)
   assert.match(prompt, /\[Scheduled routine\] Summarize findings/)
+})
+
+test('security: delegated routine arguments remain literal shell values', () => {
+  const { __routines } = load()
+  const title = 'Audit $(printf TITLE_EXPANDED) `printf TITLE_TICK` \'quoted\''
+  const instruction = 'Line one $(printf TASK_EXPANDED) `printf TASK_TICK`\nLine two \'quoted\''
+  const prompt = __routines.routinePrompt('research', title, instruction, 'default')
+  const command = prompt.slice(prompt.indexOf('hermes '), prompt.lastIndexOf('\n\nIf the command'))
+  const script = `hermes() { printf '%s\\037' "$@"; }\n${command}`
+  const result = spawnSync('sh', ['-c', script], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(result.stdout.split('\x1f').slice(0, -1), [
+    '-p',
+    'research',
+    'chat',
+    '-c',
+    `Routine: ${title}`,
+    '-q',
+    `[Scheduled routine] ${instruction}`
+  ])
 })
 
 test('regression: Create Cronjob passes the active profile to routinePrompt', () => {
