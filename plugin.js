@@ -1267,7 +1267,16 @@ function createCanonicalChat(name) {
   }
 
   const run = (async () => {
-    const res = await host.request('session.create', { profile: name, title: 'Bot Chat' })
+    const meta = $botMeta.get()[name] || {}
+    const prov = (meta.provider || '').trim()
+    const mod = (meta.model || '').trim()
+
+    const res = await host.request('session.create', {
+      profile: name,
+      title: 'Bot Chat',
+      ...(prov ? { provider: prov } : {}),
+      ...(mod ? { model: mod } : {})
+    })
     const sid = res?.stored_session_id
     const runtime = res?.session_id
 
@@ -1553,7 +1562,7 @@ function BotRow({ bot, onEdit }) {
 function useModelOptions() {
   return useQuery({
     queryKey: [ID, 'model-options'],
-    queryFn: () => host.request('model.options', {}),
+    queryFn: () => host.request('model.options', { include_unconfigured: true, explicit_only: false, refresh: true }),
     staleTime: 120000,
     retry: false
   })
@@ -1562,11 +1571,19 @@ function useModelOptions() {
 /**
  * Provider + model dropdowns from the gateway's configured inventory — the
  * same data the core model picker shows. `value = {provider, model}`;
- * onChange receives the merged patch. Older gateways (no model.options)
- * degrade to the previous free-text inputs.
+ * onChange receives the merged patch.
  */
 function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) {
   const { data, isLoading, error } = useModelOptions()
+
+  // Hooks are ALWAYS declared up front, before any conditional return.
+  // Declaring them after a return trips React error #310.
+  const NONE = '__default__'
+  const CUSTOM = '__custom__'
+  const providers = (data?.providers || []).filter(p => p && p.slug)
+  const isKnown =
+    !value.provider || value.provider === NONE || providers.some(p => p.slug === value.provider)
+  const [useFreeText, setUseFreeText] = useState(!isKnown)
 
   if (isLoading) {
     return jsx('div', {
@@ -1574,8 +1591,6 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
       children: jsx(GlyphSpinner, { spinner: 'breathe', className: 'text-(--ui-text-tertiary)' })
     })
   }
-
-  const providers = (data?.providers || []).filter(p => (p.models || []).length)
 
   if (error || !providers.length) {
     // Fallback: free text (older gateway or empty inventory).
@@ -1585,7 +1600,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
         labeled(
           'Provider',
           jsx(Input, {
-            placeholder: 'nous / openrouter \u2026',
+            placeholder: 'omnirouter / 9router / nous \u2026',
             value: value.provider,
             onChange: event => onChange({ provider: event.target.value })
           })
@@ -1593,7 +1608,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
         labeled(
           'Model',
           jsx(Input, {
-            placeholder: 'anthropic/claude-fable-5',
+            placeholder: 'antigravity/gemini-3.6-flash-high',
             value: value.model,
             onChange: event => onChange({ model: event.target.value })
           })
@@ -1602,9 +1617,46 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
     })
   }
 
-  const NONE = '__default__'
+  if (useFreeText) {
+    return jsxs('div', {
+      style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+      children: [
+        jsxs('div', {
+          style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' },
+          children: [
+            labeled(
+              'Provider (Custom)',
+              jsx(Input, {
+                placeholder: 'e.g. omnirouter, inferx, 9router',
+                value: value.provider,
+                onChange: event => onChange({ provider: event.target.value })
+              })
+            ),
+            labeled(
+              'Model (Custom)',
+              jsx(Input, {
+                placeholder: 'e.g. antigravity/gemini-3.6-flash-high',
+                value: value.model,
+                onChange: event => onChange({ model: event.target.value })
+              })
+            )
+          ]
+        }),
+        jsx(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          className: 'h-6 self-start text-xs text-(--ui-text-tertiary)',
+          onClick: () => setUseFreeText(false),
+          children: '← Back to dropdowns'
+        })
+      ]
+    })
+  }
+
   const activeProvider = providers.find(p => p.slug === value.provider) || null
-  const models = activeProvider ? (activeProvider.models || []).map(m => (typeof m === 'string' ? m : m.id)) : []
+  const models = activeProvider
+    ? (activeProvider.models || []).map(m => (typeof m === 'string' ? m : m.id || m.name || ''))
+    : []
 
   return jsxs('div', {
     style: { display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '10px' },
@@ -1616,19 +1668,17 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
           onValueChange: v => {
             if (v === NONE) {
               onChange({ provider: '', model: '' })
+            } else if (v === CUSTOM) {
+              setUseFreeText(true)
             } else {
               const prov = providers.find(p => p.slug === v)
-              const first = prov?.models?.[0]
+              const provModels = (prov?.models || []).map(m =>
+                typeof m === 'string' ? m : m.id || m.name || ''
+              )
+              const first = provModels[0] || ''
               onChange({
                 provider: v,
-                // Keep the model if it exists under the new provider,
-                // otherwise preselect that provider's first model.
-                model:
-                  prov && (prov.models || []).some(m => (typeof m === 'string' ? m : m.id) === value.model)
-                    ? value.model
-                    : typeof first === 'string'
-                      ? first
-                      : first?.id || ''
+                model: prov && provModels.includes(value.model) ? value.model : first
               })
             }
           },
@@ -1637,7 +1687,14 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
             jsxs(SelectContent, {
               children: [
                 jsx(SelectItem, { value: NONE, children: 'Inherit (launch profile)' }),
-                ...providers.map(p => jsx(SelectItem, { value: p.slug, children: p.slug }, p.slug))
+                ...providers.map(p =>
+                  jsx(
+                    SelectItem,
+                    { value: p.slug, children: p.name ? `${p.name} (${p.slug})` : p.slug },
+                    p.slug
+                  )
+                ),
+                jsx(SelectItem, { value: CUSTOM, children: '✏️ Enter manually…' })
               ]
             })
           ]
@@ -1645,7 +1702,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
       ),
       labeled(
         'Model',
-        activeProvider
+        activeProvider && models.length > 0
           ? jsxs(Select, {
               value: value.model || (models[0] ?? ''),
               onValueChange: v => onChange({ model: v }),
@@ -1657,10 +1714,9 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
               ]
             })
           : jsx(Input, {
-              disabled: true,
-              placeholder: placeholderModel,
-              value: '',
-              onChange: () => undefined
+              placeholder: placeholderModel || 'e.g. model name',
+              value: value.model,
+              onChange: event => onChange({ model: event.target.value })
             })
       )
     ]
@@ -2166,7 +2222,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
   const [color, setColor] = useState(AVATAR_COLORS[3])
   const [image, setImage] = useState(null)
   const [advanced, setAdvanced] = useState(false)
-  const [cloneFrom, setCloneFrom] = useState('__none__')
+  const [cloneFrom, setCloneFrom] = useState('default')
   const [model, setModel] = useState('')
   const [provider, setProvider] = useState('')
   const [soul, setSoul] = useState('')
