@@ -1100,53 +1100,36 @@ function slugify(value) {
     .slice(0, 64)
 }
 
-/** SOUL.md for a new bot: identity + how to message the other bots. */
-function composeSoul({ name, title, description, roster, customSoul }) {
-  if (customSoul && customSoul.trim()) {
-    return customSoul
-  }
+/** Durable agent-to-agent protocol appended to every new profile SOUL. */
+function messagingProtocol(name) {
+  return [
+    '## Messaging other agents',
+    '',
+    'Discover the current agent roster immediately before a handoff with `hermes profiles list`; do not rely on a list captured when this profile was created.',
+    'Send a teammate message to that profile’s persistent "Agent Inbox" chat:',
+    '',
+    '```',
+    `hermes -p <agent-name> chat -c "Agent Inbox" -q "[Message from agent \'${name}\'] your message"`,
+    '```',
+    '',
+    '`-c "Agent Inbox"` resumes an existing named session. If the target has no inbox yet, create a short chat first, find its session id with `hermes -p <agent-name> sessions list`, and rename that session to `Agent Inbox` before retrying the delivery.',
+    'When the user writes @<agent-name>, "ask <name> to ...", or "tell <name> ...", treat it as a handoff: discover the live roster, deliver the message, wait for the reply, and report it back.',
+    'If a message starts with "[Message from agent \'<name>\']", it is a teammate message rather than user input; answer it directly and use the same protocol for any reply.'
+  ].join('\n')
+}
 
-  const teammates = roster.filter(b => b.name !== name)
-  const lines = [
+/** SOUL.md for a new bot: identity or custom intent plus the durable protocol. */
+function composeSoul({ name, title, description, customSoul }) {
+  const identity = [
     `# ${displayName({ name, title })}`,
     '',
     title ? `**Role:** ${title}` : null,
     description ? `**Mission:** ${description}` : null,
     '',
     `You are ${displayName({ name, title })}, a persistent named agent (profile \`${name}\`) on this machine.`,
-    'You keep your own memory, skills, and conversation history across sessions.',
-    '',
-    '## Messaging other agents',
-    '',
-    'You work alongside other named agents. Every agent (including you) has a',
-    'persistent chat titled "Agent Inbox" where agent-to-agent messages land.',
-    'To message a teammate, deliver into THEIR inbox via the terminal:',
-    '',
-    '```',
-    'hermes -p <agent-name> chat -c "Agent Inbox" -q "[Message from agent \'' + name + '\'] your message"',
-    '```',
-    '',
-    '(`-c "Agent Inbox"` appends to that named conversation, creating it on',
-    'first use — never a throwaway session. Always open with the',
-    "[Message from agent '" + name + "'] prefix so they know who is talking.)",
-    'Their reply prints to stdout — relay the relevant part back to the user,',
-    'and mention it came from that agent.',
-    '',
-    'If a message in YOUR chat starts with "[Message from agent \'<name>\']",',
-    'it is a teammate messaging you, not the user. Answer it directly; if a',
-    'reply back is needed, use the same command aimed at their inbox.',
-    '',
-    'When the user writes @<agent-name> or says "ask <name> to ..." /',
-    '"tell <name> ...", that is a handoff: message that agent, wait for the',
-    'reply, and report back.',
-    '',
-    'Current teammates:',
-    ...(teammates.length
-      ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`)
-      : ['- (none yet — the roster grows as agents are created)'])
-  ]
-
-  return lines.filter(line => line !== null).join('\n')
+    'You keep your own memory, skills, and conversation history across sessions.'
+  ].filter(line => line !== null).join('\n')
+  return [customSoul?.trim() || identity, messagingProtocol(name)].join('\n\n')
 }
 
 // ── bot row ──────────────────────────────────────────────────────────────────
