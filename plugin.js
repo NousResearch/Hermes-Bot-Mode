@@ -62,6 +62,329 @@ const ROSTER_KEY = [ID, 'roster']
 const ROUTINES_KEY = [ID, 'routines']
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
+// Kept inline so plugin.js remains a dependency-free, directly loadable plugin.
+const I18N_MESSAGES = {
+  en: {
+    'meta.locale': 'en',
+    'common.cancel': 'Cancel',
+    'common.save': 'Save',
+    'common.saving': 'Saving…',
+    'common.advanced': 'Advanced',
+    'common.name': 'Name',
+    'common.title': 'Title',
+    'common.description': 'Description',
+    'common.provider': 'Provider',
+    'common.model': 'Model',
+    'common.generate': 'Generate',
+    'common.generating': 'Generating…',
+    'panes.bots': 'Bots',
+    'panes.cronjobs': 'Cronjobs',
+    'agents.new': 'New Agent',
+    'agents.newEllipsis': 'New Agent…',
+    'agents.editProfile': 'Edit Profile',
+    'agents.duplicate': 'Duplicate',
+    'agents.newChat': 'New chat with this agent',
+    'agents.noConversations': 'No conversations yet — say hi',
+    'agents.noAgentsTitle': 'No agents yet',
+    'agents.noAgentsDescription': 'Create your first teammate.',
+    'agents.create': 'Create Agent',
+    'agents.creating': 'Creating…',
+    'agents.created': 'Agent “{name}” created',
+    'agents.updated': '{name} updated',
+    'agents.exists': 'An agent named “{name}” already exists.',
+    'agents.dialogDescription': 'A named teammate with its own memory, skills, and chat. It can message your other agents.',
+    'agents.editDescription': 'Appearance and role for {name}.',
+    'agents.helpPlaceholder': 'What should this agent help with?',
+    'agents.botHelpPlaceholder': 'What should this Bot help with?',
+    'agents.titlePlaceholder': 'Inbox Triage',
+    'agents.advancedDetails': 'Advanced — model, skills, toolsets, SOUL.md',
+    'agents.cloneFrom': 'Clone from profile',
+    'agents.freshProfile': 'Fresh profile (bundled skills)',
+    'agents.createEmpty': 'Create empty (skip bundled skills)',
+    'agents.skillSelectionNote': 'Per-skill and per-toolset selection lives in right-click → Edit Profile → Advanced once the agent exists (skills are installed during creation).',
+    'agents.soulOptional': 'SOUL.md (optional — replaces the generated persona)',
+    'agents.soulPlaceholder': 'Leave blank to auto-generate from name/title/description + agent-messaging roster.',
+    'agents.soulLabel': 'SOUL.md (persona + agent-messaging protocol)',
+    'agents.noDuplicateName': 'No free name for the duplicate.',
+    'agents.copySuffix': '{title} (copy)',
+    'agents.duplicating': 'Duplicating {name}…',
+    'agents.duplicateCreated': 'Created {name} — full copy of {source}',
+    'agents.duplicateFailed': 'Duplicate failed',
+    'agents.descriptionUpdateFailed': 'Saved look locally; description update failed',
+    'agents.sectionsFailed': 'Some sections failed: {sections}',
+    'agents.advancedFailed': 'Advanced configuration failed',
+    'avatar.bot': 'Bot',
+    'avatar.generate': 'Generate',
+    'avatar.upload': 'Upload',
+    'avatar.pet': 'Pet',
+    'avatar.removeImage': 'Remove image — use shape',
+    'avatar.describePlaceholder': 'Describe your avatar…',
+    'avatar.generateHint': 'Leave blank to generate from the agent’s name and description.',
+    'avatar.noModel': 'No image model available. If you just enabled one (or updated Hermes), restart the gateway: Ctrl+K → “Restart gateway”.',
+    'avatar.checkingBackend': 'Checking image backend…',
+    'avatar.chooseImage': 'Choose an image…',
+    'avatar.tooLarge': 'Image too large (max 15MB).',
+    'avatar.generationFailed': 'Avatar generation failed',
+    'pets.empty': 'No pets in the petdex gallery. Run `hermes pets` to explore.',
+    'pets.pickHint': 'Pick a pet as this agent’s profile picture.',
+    'pets.search': 'Search {count} pets…',
+    'pets.remove': 'Remove — back to shape avatar',
+    'pets.noMatch': 'No pets match.',
+    'pets.loadFailed': 'Could not load that pet — try another.',
+    'pets.more': 'Scroll for more ({visible} of {total})',
+    'model.gatewayDefault': 'gateway default',
+    'model.providerPlaceholder': 'nous / openrouter …',
+    'model.inherit': 'Inherit (launch profile)',
+    'model.launchInherited': 'inherited from launch profile',
+    'config.newGateway': 'Full configuration needs a newer gateway (restart it after updating Hermes).',
+    'config.skills': 'Skills ({enabled}/{total} enabled)',
+    'config.filterSkills': 'Filter skills…',
+    'config.toolsets': 'Toolsets ({enabled}/{total} enabled — unchecking all restores the default)',
+    'routines.untitled': 'Untitled cronjob',
+    'routines.updateFailed': 'Cronjob update failed',
+    'routines.delete': 'Delete cronjob',
+    'routines.next': 'next {time}',
+    'routines.paused': 'paused',
+    'routines.new': 'New Cronjob',
+    'routines.create': 'Create Cronjob',
+    'routines.creating': 'Scheduling…',
+    'routines.scheduled': 'Cronjob “{name}” scheduled',
+    'routines.dialogDescription': 'A recurring task {name} runs on a schedule. Runs land in its own chat history.',
+    'routines.namePlaceholder': 'Name this cronjob',
+    'routines.instruction': 'Instruction',
+    'routines.instructionPlaceholder': 'What should this cronjob do each time it runs?',
+    'routines.when': 'When to run',
+    'routines.empty': 'Cronjobs are recurring tasks this agent runs on a schedule.',
+    'routines.schedule.once': 'Once, in…',
+    'routines.schedule.hourly': 'Every hour',
+    'routines.schedule.daily': 'Every day',
+    'routines.schedule.weekdays': 'Weekdays',
+    'routines.schedule.weekly': 'Every week',
+    'routines.schedule.monthly': 'Every month',
+    'routines.schedule.interval': 'Interval',
+    'routines.schedule.advanced': 'Advanced…',
+    'routines.schedule.monday': 'Monday',
+    'routines.schedule.tuesday': 'Tuesday',
+    'routines.schedule.wednesday': 'Wednesday',
+    'routines.schedule.thursday': 'Thursday',
+    'routines.schedule.friday': 'Friday',
+    'routines.schedule.saturday': 'Saturday',
+    'routines.schedule.sunday': 'Sunday',
+    'routines.schedule.onceLabel': 'Once ({duration})',
+    'routines.schedule.dailyLabel': 'Daily',
+    'routines.schedule.everyDays': 'Every {count} days',
+    'routines.schedule.hourlyLabel': 'Hourly',
+    'routines.schedule.everyHours': 'Every {count}h',
+    'routines.schedule.everyMinutes': 'Every {count}m',
+    'routines.schedule.minutesFromNow': 'minutes from now',
+    'routines.schedule.hoursFromNow': 'hours from now',
+    'routines.schedule.daysFromNow': 'days from now',
+    'routines.schedule.minutes': 'minutes',
+    'routines.schedule.hours': 'hours',
+    'routines.schedule.days': 'days',
+    'routines.schedule.dayOfMonth': 'Day of month',
+    'routines.schedule.stopAfter': 'Stop after',
+    'routines.schedule.runsForever': 'runs (blank = forever)',
+    'routines.summary.times.one': ', {count} time total',
+    'routines.summary.times.other': ', {count} times total',
+    'routines.summary.once': 'Runs once, {count} {unit} from now',
+    'routines.summary.hourly': 'Runs at the top of every hour{cap}',
+    'routines.summary.daily': 'Runs every day at {time}{cap}',
+    'routines.summary.weekdays': 'Runs Monday–Friday at {time}{cap}',
+    'routines.summary.weekly': 'Runs every {weekday} at {time}{cap}',
+    'routines.summary.monthly': 'Runs on day {day} of each month at {time}{cap}',
+    'routines.summary.interval': 'Runs every {count} {unit}{cap}',
+    'routines.summary.raw': 'Raw schedule — every Nm/Nh/Nd or 5-field cron',
+    'routines.unit.minute.one': 'minute',
+    'routines.unit.minute.other': 'minutes',
+    'routines.unit.hour.one': 'hour',
+    'routines.unit.hour.other': 'hours',
+    'routines.unit.day.one': 'day',
+    'routines.unit.day.other': 'days',
+    'routines.unit.run.one': 'run',
+    'routines.unit.run.other': 'runs',
+    'roster.unavailable': 'Roster unavailable: {error}. If your gateway predates profiles.list, update Hermes and restart the gateway.',
+    'roster.gatewayError': 'gateway error',
+    'roster.waiting': 'Waiting for the gateway connection… (remote gateways can take a few seconds; retries automatically)',
+    'roster.retry': 'Retry now',
+    'palette.openBots': 'Open the Bots pane and hit “New Agent”.'
+  },
+  'pt-BR': {
+    'meta.locale': 'pt-BR',
+    'common.cancel': 'Cancelar',
+    'common.save': 'Salvar',
+    'common.saving': 'Salvando…',
+    'common.advanced': 'Avançado',
+    'common.name': 'Nome',
+    'common.title': 'Título',
+    'common.description': 'Descrição',
+    'common.provider': 'Provedor',
+    'common.model': 'Modelo',
+    'common.generate': 'Gerar',
+    'common.generating': 'Gerando…',
+    'panes.bots': 'Bots',
+    'panes.cronjobs': 'Tarefas agendadas',
+    'agents.new': 'Novo agente',
+    'agents.newEllipsis': 'Novo agente…',
+    'agents.editProfile': 'Editar perfil',
+    'agents.duplicate': 'Duplicar',
+    'agents.newChat': 'Nova conversa com este agente',
+    'agents.noConversations': 'Ainda não há conversas — diga oi',
+    'agents.noAgentsTitle': 'Ainda não há agentes',
+    'agents.noAgentsDescription': 'Crie seu primeiro colega de equipe.',
+    'agents.create': 'Criar agente',
+    'agents.creating': 'Criando…',
+    'agents.created': 'Agente “{name}” criado',
+    'agents.updated': '{name} atualizado',
+    'agents.exists': 'Já existe um agente chamado “{name}”.',
+    'agents.dialogDescription': 'Um colega de equipe com nome, memória, habilidades e conversa próprias. Ele pode enviar mensagens aos seus outros agentes.',
+    'agents.editDescription': 'Aparência e função de {name}.',
+    'agents.helpPlaceholder': 'Como este agente deve ajudar?',
+    'agents.botHelpPlaceholder': 'Como este Bot deve ajudar?',
+    'agents.titlePlaceholder': 'Triagem da caixa de entrada',
+    'agents.advancedDetails': 'Avançado — modelo, habilidades, conjuntos de ferramentas e SOUL.md',
+    'agents.cloneFrom': 'Clonar do perfil',
+    'agents.freshProfile': 'Perfil novo (habilidades incluídas)',
+    'agents.createEmpty': 'Criar vazio (sem habilidades incluídas)',
+    'agents.skillSelectionNote': 'A seleção por habilidade e conjunto de ferramentas fica em clique direito → Editar perfil → Avançado depois que o agente for criado (as habilidades são instaladas durante a criação).',
+    'agents.soulOptional': 'SOUL.md (opcional — substitui a persona gerada)',
+    'agents.soulPlaceholder': 'Deixe em branco para gerar automaticamente com nome/título/descrição + lista de agentes.',
+    'agents.soulLabel': 'SOUL.md (persona + protocolo de mensagens entre agentes)',
+    'agents.noDuplicateName': 'Não há um nome livre para a cópia.',
+    'agents.copySuffix': '{title} (cópia)',
+    'agents.duplicating': 'Duplicando {name}…',
+    'agents.duplicateCreated': '{name} criado — cópia completa de {source}',
+    'agents.duplicateFailed': 'Falha ao duplicar',
+    'agents.descriptionUpdateFailed': 'A aparência foi salva localmente; não foi possível atualizar a descrição',
+    'agents.sectionsFailed': 'Falha em algumas seções: {sections}',
+    'agents.advancedFailed': 'Falha na configuração avançada',
+    'avatar.bot': 'Bot',
+    'avatar.generate': 'Gerar',
+    'avatar.upload': 'Enviar',
+    'avatar.pet': 'Pet',
+    'avatar.removeImage': 'Remover imagem — usar forma',
+    'avatar.describePlaceholder': 'Descreva seu avatar…',
+    'avatar.generateHint': 'Deixe em branco para gerar a partir do nome e da descrição do agente.',
+    'avatar.noModel': 'Nenhum modelo de imagem disponível. Se você acabou de ativar um (ou atualizar o Hermes), reinicie o gateway: Ctrl+K → “Reiniciar gateway”.',
+    'avatar.checkingBackend': 'Verificando o serviço de imagens…',
+    'avatar.chooseImage': 'Escolher uma imagem…',
+    'avatar.tooLarge': 'Imagem muito grande (máx. 15 MB).',
+    'avatar.generationFailed': 'Falha ao gerar o avatar',
+    'pets.empty': 'Não há pets na galeria do petdex. Execute `hermes pets` para explorar.',
+    'pets.pickHint': 'Escolha um pet como foto de perfil deste agente.',
+    'pets.search': 'Pesquisar entre {count} pets…',
+    'pets.remove': 'Remover — voltar ao avatar de forma',
+    'pets.noMatch': 'Nenhum pet encontrado.',
+    'pets.loadFailed': 'Não foi possível carregar esse pet — tente outro.',
+    'pets.more': 'Role para ver mais ({visible} de {total})',
+    'model.gatewayDefault': 'padrão do gateway',
+    'model.providerPlaceholder': 'nous / openrouter …',
+    'model.inherit': 'Herdar (perfil de inicialização)',
+    'model.launchInherited': 'herdado do perfil de inicialização',
+    'config.newGateway': 'A configuração completa exige um gateway mais recente (reinicie-o após atualizar o Hermes).',
+    'config.skills': 'Habilidades ({enabled}/{total} ativas)',
+    'config.filterSkills': 'Filtrar habilidades…',
+    'config.toolsets': 'Conjuntos de ferramentas ({enabled}/{total} ativos — desmarcar todos restaura o padrão)',
+    'routines.untitled': 'Tarefa sem título',
+    'routines.updateFailed': 'Falha ao atualizar a tarefa',
+    'routines.delete': 'Excluir tarefa agendada',
+    'routines.next': 'próxima {time}',
+    'routines.paused': 'pausada',
+    'routines.new': 'Nova tarefa agendada',
+    'routines.create': 'Criar tarefa agendada',
+    'routines.creating': 'Agendando…',
+    'routines.scheduled': 'Tarefa “{name}” agendada',
+    'routines.dialogDescription': 'Uma tarefa recorrente executada por {name} conforme a agenda. As execuções ficam no histórico de conversa do agente.',
+    'routines.namePlaceholder': 'Dê um nome à tarefa',
+    'routines.instruction': 'Instrução',
+    'routines.instructionPlaceholder': 'O que esta tarefa deve fazer a cada execução?',
+    'routines.when': 'Quando executar',
+    'routines.empty': 'Tarefas agendadas são atividades recorrentes que este agente executa conforme uma agenda.',
+    'routines.schedule.once': 'Uma vez, em…',
+    'routines.schedule.hourly': 'A cada hora',
+    'routines.schedule.daily': 'Todos os dias',
+    'routines.schedule.weekdays': 'Dias úteis',
+    'routines.schedule.weekly': 'Toda semana',
+    'routines.schedule.monthly': 'Todo mês',
+    'routines.schedule.interval': 'Intervalo',
+    'routines.schedule.advanced': 'Avançado…',
+    'routines.schedule.monday': 'Segunda-feira',
+    'routines.schedule.tuesday': 'Terça-feira',
+    'routines.schedule.wednesday': 'Quarta-feira',
+    'routines.schedule.thursday': 'Quinta-feira',
+    'routines.schedule.friday': 'Sexta-feira',
+    'routines.schedule.saturday': 'Sábado',
+    'routines.schedule.sunday': 'Domingo',
+    'routines.schedule.onceLabel': 'Uma vez ({duration})',
+    'routines.schedule.dailyLabel': 'Diariamente',
+    'routines.schedule.everyDays': 'A cada {count} dias',
+    'routines.schedule.hourlyLabel': 'A cada hora',
+    'routines.schedule.everyHours': 'A cada {count} h',
+    'routines.schedule.everyMinutes': 'A cada {count} min',
+    'routines.schedule.minutesFromNow': 'minutos a partir de agora',
+    'routines.schedule.hoursFromNow': 'horas a partir de agora',
+    'routines.schedule.daysFromNow': 'dias a partir de agora',
+    'routines.schedule.minutes': 'minutos',
+    'routines.schedule.hours': 'horas',
+    'routines.schedule.days': 'dias',
+    'routines.schedule.dayOfMonth': 'Dia do mês',
+    'routines.schedule.stopAfter': 'Parar após',
+    'routines.schedule.runsForever': 'execuções (em branco = para sempre)',
+    'routines.summary.times.one': ', {count} vez no total',
+    'routines.summary.times.other': ', {count} vezes no total',
+    'routines.summary.once': 'Executa uma vez, daqui a {count} {unit}',
+    'routines.summary.hourly': 'Executa no início de cada hora{cap}',
+    'routines.summary.daily': 'Executa todos os dias às {time}{cap}',
+    'routines.summary.weekdays': 'Executa de segunda a sexta às {time}{cap}',
+    'routines.summary.weekly': 'Executa semanalmente, {weekday}, às {time}{cap}',
+    'routines.summary.monthly': 'Executa no dia {day} de cada mês às {time}{cap}',
+    'routines.summary.interval': 'Executa a cada {count} {unit}{cap}',
+    'routines.summary.raw': 'Agenda bruta — every Nm/Nh/Nd ou cron de 5 campos',
+    'routines.unit.minute.one': 'minuto',
+    'routines.unit.minute.other': 'minutos',
+    'routines.unit.hour.one': 'hora',
+    'routines.unit.hour.other': 'horas',
+    'routines.unit.day.one': 'dia',
+    'routines.unit.day.other': 'dias',
+    'routines.unit.run.one': 'execução',
+    'routines.unit.run.other': 'execuções',
+    'roster.unavailable': 'Lista indisponível: {error}. Se o gateway for anterior a profiles.list, atualize o Hermes e reinicie o gateway.',
+    'roster.gatewayError': 'erro do gateway',
+    'roster.waiting': 'Aguardando conexão com o gateway… (gateways remotos podem levar alguns segundos; novas tentativas são automáticas)',
+    'roster.retry': 'Tentar agora',
+    'palette.openBots': 'Abra o painel Bots e clique em “Novo agente”.'
+  }
+}
+
+function toMessageTree(messages) {
+  const tree = {}
+  for (const [key, value] of Object.entries(messages)) {
+    const parts = key.split('.')
+    let node = tree
+    for (const part of parts.slice(0, -1)) {
+      node = node[part] ||= {}
+    }
+    node[parts.at(-1)] = value
+  }
+  return tree
+}
+
+const I18N_BUNDLES = Object.fromEntries(Object.entries(I18N_MESSAGES).map(([locale, messages]) => [locale, toMessageTree(messages)]))
+
+function interpolate(message, args) {
+  return message.replace(/\{(\w+)\}/g, (_, name) => String(args[name] ?? `{${name}}`))
+}
+
+function translate(key, args = {}) {
+  const fallback = I18N_MESSAGES.en[key] || key
+  try {
+    const localized = pluginCtx?.i18n?.t?.(key) || fallback
+    return interpolate(localized === key ? fallback : localized, args)
+  } catch {
+    return interpolate(fallback, args)
+  }
+}
+
 /** Captured in register() so components can reach plugin storage. */
 let pluginCtx = null
 
@@ -198,7 +521,7 @@ async function duplicateBot(bot, roster) {
   }
 
   if (!name) {
-    throw new Error('No free name for the duplicate.')
+    throw new Error(translate('agents.noDuplicateName'))
   }
 
   await host.request('profiles.create', {
@@ -213,7 +536,7 @@ async function duplicateBot(bot, roster) {
   if (meta) {
     saveBotMeta(name, {
       ...meta,
-      title: meta.title ? `${meta.title} (copy)` : ''
+      title: meta.title ? translate('agents.copySuffix', { title: meta.title }) : ''
     })
   }
 
@@ -570,7 +893,7 @@ function pickImageFromDevice() {
       }
 
       if (file.size > 15_000_000) {
-        host.notify({ kind: 'error', message: 'Image too large (max 15MB).' })
+        host.notify({ kind: 'error', message: translate('avatar.tooLarge') })
         return resolve(null)
       }
 
@@ -686,7 +1009,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
         onImage(await normalizeAvatarImage(img))
       }
     } catch (err) {
-      host.notifyError(err, 'Avatar generation failed')
+      host.notifyError(err, translate('avatar.generationFailed'))
     } finally {
       setGenBusy(false)
     }
@@ -715,7 +1038,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
       // Tab pills: Bot | Generate | Upload | Pet
       jsxs('div', {
         className: 'flex items-center gap-1',
-        children: [tabButton('bot', 'Bot'), tabButton('generate', 'Generate'), tabButton('upload', 'Upload'), tabButton('pet', 'Pet')]
+        children: [tabButton('bot', translate('avatar.bot')), tabButton('generate', translate('avatar.generate')), tabButton('upload', translate('avatar.upload')), tabButton('pet', translate('avatar.pet'))]
       }),
 
       image && tab !== 'generate'
@@ -724,7 +1047,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
             variant: 'ghost',
             size: 'sm',
             onClick: () => onImage(null),
-            children: 'Remove image — use shape'
+            children: translate('avatar.removeImage')
           })
         : null,
 
@@ -793,7 +1116,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
               children: [
                 jsx(Textarea, {
                   className: 'min-h-16 text-xs',
-                  placeholder: 'Describe your avatar…',
+                  placeholder: translate('avatar.describePlaceholder'),
                   value: describe,
                   onChange: event => setDescribe(event.target.value)
                 }),
@@ -807,14 +1130,14 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                     genBusy
                       ? jsx(GlyphSpinner, { spinner: 'breathe', className: 'mr-1 text-[0.8rem]' })
                       : jsx(Codicon, { name: 'sparkle', className: 'mr-1 text-[0.8rem]' }),
-                    genBusy ? 'Generating…' : 'Generate'
+                    genBusy ? translate('common.generating') : translate('common.generate')
                   ]
                 }),
                 describe.trim()
                   ? null
                   : jsx('div', {
                       className: 'text-center text-[0.65rem] text-(--ui-text-quaternary)',
-                      children: 'Leave blank to generate from the agent\u2019s name and description.'
+                      children: translate('avatar.generateHint')
                     })
               ]
             })
@@ -822,8 +1145,8 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
               className: 'px-2 py-3 text-center text-xs leading-5 text-(--ui-text-tertiary)',
               children:
                 imagen === false
-                  ? 'No image model available. If you just enabled one (or updated Hermes), restart the gateway: Ctrl+K → "Restart gateway".'
-                  : 'Checking image backend…'
+                  ? translate('avatar.noModel')
+                  : translate('avatar.checkingBackend')
             })
         : null,
 
@@ -833,7 +1156,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
             variant: 'secondary',
             className: 'w-full justify-center',
             onClick: upload,
-            children: [jsx(Codicon, { name: 'device-camera', className: 'mr-1 text-[0.8rem]' }), 'Choose an image…']
+            children: [jsx(Codicon, { name: 'device-camera', className: 'mr-1 text-[0.8rem]' }), translate('avatar.chooseImage')]
           })
         : null,
 
@@ -954,7 +1277,7 @@ function PetTab({ image, onImage }) {
   if (!pets.length) {
     return jsx('div', {
       className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
-      children: 'No pets in the petdex gallery. Run `hermes pets` to explore.'
+      children: translate('pets.empty')
     })
   }
 
@@ -982,11 +1305,11 @@ function PetTab({ image, onImage }) {
     children: [
       jsx('div', {
         className: 'text-center text-[0.65rem] text-(--ui-text-quaternary)',
-        children: 'Pick a pet as this agent’s profile picture.'
+        children: translate('pets.pickHint')
       }),
       jsx(Input, {
         className: 'h-7 text-xs',
-        placeholder: `Search ${pets.length} pets…`,
+        placeholder: translate('pets.search', { count: pets.length }),
         value: query,
         onChange: event => {
           setQuery(event.target.value)
@@ -1003,13 +1326,13 @@ function PetTab({ image, onImage }) {
               setSelectedSlug(null)
               onImage(null)
             },
-            children: 'Remove — back to shape avatar'
+            children: translate('pets.remove')
           })
         : null,
       filtered.length === 0
         ? jsx('div', {
             className: 'py-3 text-center text-xs text-(--ui-text-quaternary)',
-            children: 'No pets match.'
+            children: translate('pets.noMatch')
           })
         : jsxs('div', {
             onScroll,
@@ -1040,7 +1363,7 @@ function PetTab({ image, onImage }) {
                             onImage(icon)
                           } else {
                             setSelectedSlug(null)
-                            host.notify({ kind: 'error', message: 'Could not load that pet — try another.' })
+                            host.notify({ kind: 'error', message: translate('pets.loadFailed') })
                           }
                         })
                       },
@@ -1059,7 +1382,7 @@ function PetTab({ image, onImage }) {
               limit < ranked.length
                 ? jsx('div', {
                     className: 'py-2 text-center text-[0.65rem] text-(--ui-text-quaternary)',
-                    children: `Scroll for more (${limit} of ${ranked.length})`
+                    children: translate('pets.more', { visible: limit, total: ranked.length })
                   })
                 : null
             ]
@@ -1220,7 +1543,7 @@ function BotRow({ bot, onEdit }) {
           }),
           jsx('div', {
             className: 'truncate text-xs text-(--ui-text-tertiary)',
-            children: last?.preview || bot.description || 'No conversations yet — say hi'
+            children: last?.preview || bot.description || translate('agents.noConversations')
           })
         ]
       })
@@ -1232,18 +1555,18 @@ function BotRow({ bot, onEdit }) {
       jsx(ContextMenuTrigger, { asChild: true, children: row }),
       jsxs(ContextMenuContent, {
         children: [
-          jsx(ContextMenuItem, { onSelect: () => onEdit(bot), children: 'Edit Profile' }),
+          jsx(ContextMenuItem, { onSelect: () => onEdit(bot), children: translate('agents.editProfile') }),
           jsx(ContextMenuItem, {
             onSelect: () => {
-              host.notify({ kind: 'info', message: `Duplicating ${displayName(bot, meta)}…` })
+              host.notify({ kind: 'info', message: translate('agents.duplicating', { name: displayName(bot, meta) }) })
               duplicateBot(bot, $lastRoster.get())
                 .then(name => {
                   queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
-                  host.notify({ kind: 'success', message: `Created ${name} — full copy of ${bot.name}` })
+                  host.notify({ kind: 'success', message: translate('agents.duplicateCreated', { name, source: bot.name }) })
                 })
-                .catch(err => host.notifyError(err, 'Duplicate failed'))
+                .catch(err => host.notifyError(err, translate('agents.duplicateFailed')))
             },
-            children: 'Duplicate'
+            children: translate('agents.duplicate')
           }),
           jsx(ContextMenuSeparator, {}),
           jsx(ContextMenuItem, {
@@ -1254,7 +1577,7 @@ function BotRow({ bot, onEdit }) {
                 host.newChat(bot.name)
               }
             },
-            children: 'New chat with this agent'
+            children: translate('agents.newChat')
           })
         ]
       })
@@ -1279,7 +1602,7 @@ function useModelOptions() {
  * onChange receives the merged patch. Older gateways (no model.options)
  * degrade to the previous free-text inputs.
  */
-function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) {
+function ModelPicker({ value, onChange, placeholderModel = translate('model.gatewayDefault') }) {
   const { data, isLoading, error } = useModelOptions()
 
   if (isLoading) {
@@ -1297,15 +1620,15 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
       style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' },
       children: [
         labeled(
-          'Provider',
+          translate('common.provider'),
           jsx(Input, {
-            placeholder: 'nous / openrouter \u2026',
+            placeholder: translate('model.providerPlaceholder'),
             value: value.provider,
             onChange: event => onChange({ provider: event.target.value })
           })
         ),
         labeled(
-          'Model',
+          translate('common.model'),
           jsx(Input, {
             placeholder: 'anthropic/claude-fable-5',
             value: value.model,
@@ -1324,7 +1647,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
     style: { display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '10px' },
     children: [
       labeled(
-        'Provider',
+        translate('common.provider'),
         jsxs(Select, {
           value: value.provider || NONE,
           onValueChange: v => {
@@ -1350,7 +1673,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
             jsx(SelectTrigger, { className: 'h-8 rounded-md', children: jsx(SelectValue, {}) }),
             jsxs(SelectContent, {
               children: [
-                jsx(SelectItem, { value: NONE, children: 'Inherit (launch profile)' }),
+                jsx(SelectItem, { value: NONE, children: translate('model.inherit') }),
                 ...providers.map(p => jsx(SelectItem, { value: p.slug, children: p.slug }, p.slug))
               ]
             })
@@ -1358,7 +1681,7 @@ function ModelPicker({ value, onChange, placeholderModel = 'gateway default' }) 
         })
       ),
       labeled(
-        'Model',
+        translate('common.model'),
         activeProvider
           ? jsxs(Select, {
               value: value.model || (models[0] ?? ''),
@@ -1446,7 +1769,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   if (unsupported) {
     return jsx('div', {
       className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
-      children: 'Full configuration needs a newer gateway (restart it after updating Hermes).'
+      children: translate('config.newGateway')
     })
   }
 
@@ -1486,13 +1809,13 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         onChange: patch => setState(prev => ({ ...prev, dirtyModel: true, ...patch }))
       }),
       labeled(
-        `Skills (${enabledSkills}/${state.skills.length} enabled)`,
+        translate('config.skills', { enabled: enabledSkills, total: state.skills.length }),
         jsxs('div', {
           className: 'grid gap-1.5 rounded-md border border-(--ui-stroke-secondary) p-2',
           children: [
             jsx(Input, {
               className: 'h-7 text-xs',
-              placeholder: 'Filter skills…',
+              placeholder: translate('config.filterSkills'),
               value: skillFilter,
               onChange: event => setSkillFilter(event.target.value)
             }),
@@ -1504,7 +1827,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         })
       ),
       labeled(
-        `Toolsets (${enabledToolsets}/${state.toolsets.length} enabled — unchecking all restores the default)`,
+        translate('config.toolsets', { enabled: enabledToolsets, total: state.toolsets.length }),
         jsx('div', {
           className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
           children: jsx(ScrollArea, {
@@ -1514,7 +1837,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         })
       ),
       labeled(
-        'SOUL.md (persona + agent-messaging protocol)',
+        translate('agents.soulLabel'),
         jsx(Textarea, {
           className: 'min-h-28 font-mono text-xs leading-5',
           value: state.soul,
@@ -1636,7 +1959,7 @@ function EditProfileDialog({ bot, open, onClose }) {
         })
         queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
       } catch (err) {
-        host.notifyError(err, 'Saved look locally; description update failed')
+        host.notifyError(err, translate('agents.descriptionUpdateFailed'))
       }
     }
 
@@ -1646,14 +1969,14 @@ function EditProfileDialog({ bot, open, onClose }) {
         const failed = Object.entries(res?.applied || {}).filter(([, ok]) => !ok)
 
         if (failed.length) {
-          host.notify({ kind: 'error', message: `Some sections failed: ${failed.map(([k]) => k).join(', ')}` })
+          host.notify({ kind: 'error', message: translate('agents.sectionsFailed', { sections: failed.map(([k]) => k).join(', ') }) })
         }
       } catch (err) {
-        host.notifyError(err, 'Advanced configuration failed')
+        host.notifyError(err, translate('agents.advancedFailed'))
       }
     }
 
-    host.notify({ kind: 'success', message: `${displayName(bot, { title })} updated` })
+    host.notify({ kind: 'success', message: translate('agents.updated', { name: displayName(bot, { title }) }) })
     setBusy(false)
     onClose()
   }
@@ -1666,8 +1989,8 @@ function EditProfileDialog({ bot, open, onClose }) {
       children: [
         jsxs(DialogHeader, {
           children: [
-            jsx(DialogTitle, { children: 'Edit Profile' }),
-            jsx(DialogDescription, { children: `Appearance and role for ${bot.name}.` })
+            jsx(DialogTitle, { children: translate('agents.editProfile') }),
+            jsx(DialogDescription, { children: translate('agents.editDescription', { name: bot.name }) })
           ]
         }),
         jsxs('div', {
@@ -1687,7 +2010,7 @@ function EditProfileDialog({ bot, open, onClose }) {
               generateSeed: { name: bot.name, title, description }
             }),
             labeled(
-              'Title',
+              translate('common.title'),
               jsx(Input, {
                 placeholder: displayName(bot, null),
                 value: title,
@@ -1695,10 +2018,10 @@ function EditProfileDialog({ bot, open, onClose }) {
               })
             ),
             labeled(
-              'Description',
+              translate('common.description'),
               jsx(Textarea, {
                 className: 'min-h-16',
-                placeholder: 'What should this agent help with?',
+                placeholder: translate('agents.helpPlaceholder'),
                 value: description,
                 onChange: event => setDescription(event.target.value)
               })
@@ -1710,7 +2033,7 @@ function EditProfileDialog({ bot, open, onClose }) {
               onClick: () => setAdvanced(v => !v),
               children: [
                 jsx(Codicon, { name: advanced ? 'chevron-down' : 'chevron-right', className: 'text-[0.8rem]' }),
-                'Advanced — model, skills, toolsets, SOUL.md'
+                translate('agents.advancedDetails')
               ]
             }),
             advanced
@@ -1723,8 +2046,8 @@ function EditProfileDialog({ bot, open, onClose }) {
         }),
         jsxs(DialogFooter, {
           children: [
-            jsx(Button, { variant: 'ghost', disabled: busy, onClick: onClose, children: 'Cancel' }),
-            jsx(Button, { disabled: busy, onClick: submit, children: busy ? 'Saving…' : 'Save' })
+            jsx(Button, { variant: 'ghost', disabled: busy, onClick: onClose, children: translate('common.cancel') }),
+            jsx(Button, { disabled: busy, onClick: submit, children: busy ? translate('common.saving') : translate('common.save') })
           ]
         })
       ]
@@ -1793,7 +2116,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
       saveBotMeta(slug, { shape, color, image, title: title.trim() })
       queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
-      host.notify({ kind: 'success', message: `Agent "${displayName({ name: slug, title })}" created` })
+      host.notify({ kind: 'success', message: translate('agents.created', { name: displayName({ name: slug, title }) }) })
       reset()
       onClose()
       $selectedBot.set(slug)
@@ -1820,9 +2143,9 @@ function CreateAgentDialog({ open, onClose, roster }) {
       children: [
         jsxs(DialogHeader, {
           children: [
-            jsx(DialogTitle, { children: 'New Agent' }),
+            jsx(DialogTitle, { children: translate('agents.new') }),
             jsx(DialogDescription, {
-              children: 'A named teammate with its own memory, skills, and chat. It can message your other agents.'
+              children: translate('agents.dialogDescription')
             })
           ]
         }),
@@ -1843,7 +2166,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
               generateSeed: { name: slug || 'agent', title, description }
             }),
             labeled(
-              'Name',
+              translate('common.name'),
               jsx(Input, {
                 autoFocus: true,
                 placeholder: 'inbox-triage',
@@ -1854,22 +2177,22 @@ function CreateAgentDialog({ open, onClose, roster }) {
             taken
               ? jsx('div', {
                   className: 'text-xs text-(--ui-accent)',
-                  children: `An agent named "${slug}" already exists.`
+                  children: translate('agents.exists', { name: slug })
                 })
               : null,
             labeled(
-              'Title',
+              translate('common.title'),
               jsx(Input, {
-                placeholder: 'Inbox Triage',
+                placeholder: translate('agents.titlePlaceholder'),
                 value: title,
                 onChange: event => setTitle(event.target.value)
               })
             ),
             labeled(
-              'Description',
+              translate('common.description'),
               jsx(Textarea, {
                 className: 'min-h-16',
-                placeholder: 'What should this Bot help with?',
+                placeholder: translate('agents.botHelpPlaceholder'),
                 value: description,
                 onChange: event => setDescription(event.target.value)
               })
@@ -1881,7 +2204,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
               onClick: () => setAdvanced(v => !v),
               children: [
                 jsx(Codicon, { name: advanced ? 'chevron-down' : 'chevron-right', className: 'text-[0.8rem]' }),
-                'Advanced'
+                translate('common.advanced')
               ]
             }),
             advanced
@@ -1889,7 +2212,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                   className: 'grid gap-3.5 rounded-md border border-(--ui-stroke-secondary) p-3',
                   children: [
                     labeled(
-                      'Clone from profile',
+                      translate('agents.cloneFrom'),
                       jsxs(Select, {
                         value: cloneFrom,
                         onValueChange: setCloneFrom,
@@ -1900,7 +2223,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                           }),
                           jsxs(SelectContent, {
                             children: [
-                              jsx(SelectItem, { value: '__none__', children: 'Fresh profile (bundled skills)' }),
+                              jsx(SelectItem, { value: '__none__', children: translate('agents.freshProfile') }),
                               ...roster.map(b => jsx(SelectItem, { value: b.name, children: b.name }, b.name))
                             ]
                           })
@@ -1917,14 +2240,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
                           setModel(patch.model)
                         }
                       },
-                      placeholderModel: 'inherited from launch profile'
+                      placeholderModel: translate('model.launchInherited')
                     }),
                     labeled(
-                      'SOUL.md (optional — replaces the generated persona)',
+                      translate('agents.soulOptional'),
                       jsx(Textarea, {
                         className: 'min-h-24 font-mono text-xs leading-5',
                         placeholder:
-                          'Leave blank to auto-generate from name/title/description + agent-messaging roster.',
+                          translate('agents.soulPlaceholder'),
                         value: soul,
                         onChange: event => setSoul(event.target.value)
                       })
@@ -1936,13 +2259,13 @@ function CreateAgentDialog({ open, onClose, roster }) {
                           checked: noSkills,
                           onCheckedChange: value => setNoSkills(Boolean(value))
                         }),
-                        'Create empty (skip bundled skills)'
+                        translate('agents.createEmpty')
                       ]
                     }),
                     jsx('div', {
                       className: 'text-[0.65rem] leading-4 text-(--ui-text-quaternary)',
                       children:
-                        'Per-skill and per-toolset selection lives in right-click → Edit Profile → Advanced once the agent exists (skills are installed during creation).'
+                        translate('agents.skillSelectionNote')
                     })
                   ]
                 })
@@ -1964,12 +2287,12 @@ function CreateAgentDialog({ open, onClose, roster }) {
                 reset()
                 onClose()
               },
-              children: 'Cancel'
+              children: translate('common.cancel')
             }),
             jsx(Button, {
               disabled: busy || !valid || taken,
               onClick: submit,
-              children: busy ? 'Creating…' : 'Create Agent'
+              children: busy ? translate('agents.creating') : translate('agents.create')
             })
           ]
         })
@@ -1993,7 +2316,7 @@ function routineBot(job) {
 }
 
 function routineTitle(job) {
-  return (job?.name || '').replace(BOT_TAG_RE, '') || 'Untitled cronjob'
+  return (job?.name || '').replace(BOT_TAG_RE, '') || translate('routines.untitled')
 }
 
 function useRoutines() {
@@ -2018,13 +2341,13 @@ function scheduleLabel(schedule) {
   const once = /^once in (.+)$/.exec(schedule || '')
 
   if (once) {
-    return `Once (${once[1]})`
+    return translate('routines.schedule.onceLabel', { duration: once[1] })
   }
 
   const bare = /^(\d+)([mhd])$/.exec(schedule || '')
 
   if (bare) {
-    return `Once (${bare[1]}${bare[2]})`
+    return translate('routines.schedule.onceLabel', { duration: `${bare[1]}${bare[2]}` })
   }
 
   const match = /^every (\d+)m$/.exec(schedule || '')
@@ -2034,15 +2357,15 @@ function scheduleLabel(schedule) {
 
     if (minutes % 1440 === 0) {
       const d = minutes / 1440
-      return d === 1 ? 'Daily' : `Every ${d} days`
+      return d === 1 ? translate('routines.schedule.dailyLabel') : translate('routines.schedule.everyDays', { count: d })
     }
 
     if (minutes % 60 === 0) {
       const h = minutes / 60
-      return h === 1 ? 'Hourly' : `Every ${h}h`
+      return h === 1 ? translate('routines.schedule.hourlyLabel') : translate('routines.schedule.everyHours', { count: h })
     }
 
-    return `Every ${minutes}m`
+    return translate('routines.schedule.everyMinutes', { count: minutes })
   }
 
   return schedule || ''
@@ -2076,7 +2399,7 @@ function RoutineRow({ job, onChanged }) {
       onChanged()
     } catch (err) {
       setPendingActive(null)
-      host.notifyError(err, 'Cronjob update failed')
+      host.notifyError(err, translate('routines.updateFailed'))
     } finally {
       setBusy(false)
     }
@@ -2105,7 +2428,7 @@ function RoutineRow({ job, onChanged }) {
             onCheckedChange: value => act(value ? 'resume' : 'pause')
           }),
           jsx(Tip, {
-            label: 'Delete cronjob',
+            label: translate('routines.delete'),
             children: jsx('button', {
               type: 'button',
               disabled: busy,
@@ -2127,7 +2450,7 @@ function RoutineRow({ job, onChanged }) {
           }),
           jsx('span', {
             className: 'truncate text-[0.65rem] text-(--ui-text-quaternary)',
-            children: active && job.next_run_at ? `next ${relativeTime(new Date(job.next_run_at).getTime())}` : 'paused'
+            children: active && job.next_run_at ? translate('routines.next', { time: relativeTime(new Date(job.next_run_at).getTime()) }) : translate('routines.paused')
           })
         ]
       })
@@ -2138,38 +2461,45 @@ function RoutineRow({ job, onChanged }) {
 // Structured schedule picker: frequency first, then only the detail that
 // frequency needs (time of day, weekday, day of month, interval). Emits a
 // Hermes-native schedule string; Advanced exposes it raw.
-const FREQUENCIES = [
-  { id: 'once', label: 'Once, in\u2026' },
-  { id: 'hourly', label: 'Every hour' },
-  { id: 'daily', label: 'Every day' },
-  { id: 'weekdays', label: 'Weekdays' },
-  { id: 'weekly', label: 'Every week' },
-  { id: 'monthly', label: 'Every month' },
-  { id: 'interval', label: 'Interval' },
-  { id: 'advanced', label: 'Advanced\u2026' }
-]
+function frequencyOptions() {
+  return [
+    { id: 'once', label: translate('routines.schedule.once') },
+    { id: 'hourly', label: translate('routines.schedule.hourly') },
+    { id: 'daily', label: translate('routines.schedule.daily') },
+    { id: 'weekdays', label: translate('routines.schedule.weekdays') },
+    { id: 'weekly', label: translate('routines.schedule.weekly') },
+    { id: 'monthly', label: translate('routines.schedule.monthly') },
+    { id: 'interval', label: translate('routines.schedule.interval') },
+    { id: 'advanced', label: translate('routines.schedule.advanced') }
+  ]
+}
 
-const WEEKDAYS = [
-  { id: '1', label: 'Monday' },
-  { id: '2', label: 'Tuesday' },
-  { id: '3', label: 'Wednesday' },
-  { id: '4', label: 'Thursday' },
-  { id: '5', label: 'Friday' },
-  { id: '6', label: 'Saturday' },
-  { id: '0', label: 'Sunday' }
-]
+function weekdayOptions() {
+  return [
+    { id: '1', label: translate('routines.schedule.monday') },
+    { id: '2', label: translate('routines.schedule.tuesday') },
+    { id: '3', label: translate('routines.schedule.wednesday') },
+    { id: '4', label: translate('routines.schedule.thursday') },
+    { id: '5', label: translate('routines.schedule.friday') },
+    { id: '6', label: translate('routines.schedule.saturday') },
+    { id: '0', label: translate('routines.schedule.sunday') }
+  ]
+}
 
-const TIMES = (() => {
+function timeOptions() {
   const out = []
+  const brazilian = translate('meta.locale') === 'pt-BR'
   for (let h = 0; h < 24; h++) {
     for (const m of [0, 30]) {
-      const ampm = h < 12 ? 'AM' : 'PM'
-      const h12 = h % 12 === 0 ? 12 : h % 12
-      out.push({ id: `${h}:${m}`, label: `${h12}:${String(m).padStart(2, '0')} ${ampm}`, h, m })
+      const minutes = String(m).padStart(2, '0')
+      const label = brazilian
+        ? `${String(h).padStart(2, '0')}:${minutes}`
+        : `${h % 12 === 0 ? 12 : h % 12}:${minutes} ${h < 12 ? 'AM' : 'PM'}`
+      out.push({ id: `${h}:${m}`, label, h, m })
     }
   }
   return out
-})()
+}
 
 /** Compose the Hermes schedule string from picker state. */
 function composeSchedule(state) {
@@ -2200,32 +2530,44 @@ function composeSchedule(state) {
 }
 
 function scheduleSummary(state) {
-  const t = TIMES.find(x => x.id === state.time)
-  const tl = t ? t.label : '9:00 AM'
+  const weekdays = weekdayOptions()
+  const times = timeOptions()
+  const t = times.find(x => x.id === state.time)
+  const tl = t ? t.label : times[18].label
 
-  const unitWord = u => (u === 'm' ? 'minute(s)' : u === 'd' ? 'day(s)' : 'hour(s)')
+  const pluralKey = (unit, count) => `routines.unit.${unit}.${count === 1 ? 'one' : 'other'}`
+  const unitWord = (u, count) => translate(pluralKey(u === 'm' ? 'minute' : u === 'd' ? 'day' : 'hour', count))
   const cap =
     state.freq !== 'once' && String(state.repeatN || '').trim()
-      ? `, ${Math.max(1, parseInt(state.repeatN, 10) || 1)} time(s) total`
+      ? (() => {
+          const count = Math.max(1, parseInt(state.repeatN, 10) || 1)
+          return translate(`routines.summary.times.${count === 1 ? 'one' : 'other'}`, { count })
+        })()
       : ''
 
   switch (state.freq) {
     case 'once':
-      return `Runs once, ${Math.max(1, parseInt(state.onceN, 10) || 1)} ${unitWord(state.onceUnit)} from now`
+      return (() => {
+        const count = Math.max(1, parseInt(state.onceN, 10) || 1)
+        return translate('routines.summary.once', { count, unit: unitWord(state.onceUnit, count) })
+      })()
     case 'hourly':
-      return 'Runs at the top of every hour' + cap
+      return translate('routines.summary.hourly', { cap })
     case 'daily':
-      return `Runs every day at ${tl}` + cap
+      return translate('routines.summary.daily', { time: tl, cap })
     case 'weekdays':
-      return `Runs Monday\u2013Friday at ${tl}` + cap
+      return translate('routines.summary.weekdays', { time: tl, cap })
     case 'weekly':
-      return `Runs every ${(WEEKDAYS.find(w => w.id === state.weekday) || WEEKDAYS[0]).label} at ${tl}` + cap
+      return translate('routines.summary.weekly', { weekday: (weekdays.find(w => w.id === state.weekday) || weekdays[0]).label, time: tl, cap })
     case 'monthly':
-      return `Runs on day ${state.monthday || '1'} of each month at ${tl}` + cap
+      return translate('routines.summary.monthly', { day: state.monthday || '1', time: tl, cap })
     case 'interval':
-      return `Runs every ${Math.max(1, parseInt(state.intervalN, 10) || 1)} ${unitWord(state.intervalUnit)}` + cap
+      return (() => {
+        const count = Math.max(1, parseInt(state.intervalN, 10) || 1)
+        return translate('routines.summary.interval', { count, unit: unitWord(state.intervalUnit, count), cap })
+      })()
     default:
-      return 'Raw schedule \u2014 every Nm/Nh/Nd or 5-field cron'
+      return translate('routines.summary.raw')
   }
 }
 
@@ -2245,6 +2587,7 @@ function pickerSelect(value, onChange, options) {
 function SchedulePicker({ state, setState }) {
   const upd = patch => setState(prev => ({ ...prev, ...patch }))
   const needsTime = ['daily', 'weekdays', 'weekly', 'monthly'].includes(state.freq)
+  const times = timeOptions()
 
   return jsxs('div', {
     className: 'grid gap-2',
@@ -2252,8 +2595,8 @@ function SchedulePicker({ state, setState }) {
       jsxs('div', {
         style: { display: 'grid', gridTemplateColumns: needsTime ? '1fr 1fr' : '1fr', gap: '8px' },
         children: [
-          pickerSelect(state.freq, v => upd({ freq: v }), FREQUENCIES),
-          needsTime ? pickerSelect(state.time, v => upd({ time: v }), TIMES) : null
+          pickerSelect(state.freq, v => upd({ freq: v }), frequencyOptions()),
+          needsTime ? pickerSelect(state.time, v => upd({ time: v }), times) : null
         ]
       }),
       state.freq === 'once'
@@ -2267,19 +2610,19 @@ function SchedulePicker({ state, setState }) {
                 onChange: event => upd({ onceN: event.target.value.replace(/[^0-9]/g, '').slice(0, 4) })
               }),
               pickerSelect(state.onceUnit, v => upd({ onceUnit: v }), [
-                { id: 'm', label: 'minutes from now' },
-                { id: 'h', label: 'hours from now' },
-                { id: 'd', label: 'days from now' }
+                { id: 'm', label: translate('routines.schedule.minutesFromNow') },
+                { id: 'h', label: translate('routines.schedule.hoursFromNow') },
+                { id: 'd', label: translate('routines.schedule.daysFromNow') }
               ])
             ]
           })
         : null,
       state.freq === 'weekly'
-        ? pickerSelect(state.weekday, v => upd({ weekday: v }), WEEKDAYS)
+        ? pickerSelect(state.weekday, v => upd({ weekday: v }), weekdayOptions())
         : null,
       state.freq === 'monthly'
         ? labeled(
-            'Day of month',
+            translate('routines.schedule.dayOfMonth'),
             jsx(Input, {
               className: 'h-8',
               placeholder: '1',
@@ -2299,9 +2642,9 @@ function SchedulePicker({ state, setState }) {
                 onChange: event => upd({ intervalN: event.target.value.replace(/[^0-9]/g, '').slice(0, 4) })
               }),
               pickerSelect(state.intervalUnit, v => upd({ intervalUnit: v }), [
-                { id: 'm', label: 'minutes' },
-                { id: 'h', label: 'hours' },
-                { id: 'd', label: 'days' }
+                { id: 'm', label: translate('routines.schedule.minutes') },
+                { id: 'h', label: translate('routines.schedule.hours') },
+                { id: 'd', label: translate('routines.schedule.days') }
               ])
             ]
           })
@@ -2318,14 +2661,14 @@ function SchedulePicker({ state, setState }) {
         ? jsxs('div', {
             className: 'flex items-center gap-2',
             children: [
-              jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Stop after' }),
+              jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: translate('routines.schedule.stopAfter') }),
               jsx(Input, {
                 className: 'h-7 w-16 text-xs',
                 placeholder: '\u221e',
                 value: state.repeatN,
                 onChange: event => upd({ repeatN: event.target.value.replace(/[^0-9]/g, '').slice(0, 4) })
               }),
-              jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: 'runs (blank = forever)' })
+              jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: translate('routines.schedule.runsForever') })
             ]
           })
         : null,
@@ -2381,7 +2724,7 @@ function CreateRoutineDialog({ bot, open, onClose }) {
         ...(repeatN ? { repeat: repeatN } : {})
       })
       queryClient.invalidateQueries({ queryKey: ROUTINES_KEY })
-      host.notify({ kind: 'success', message: `Cronjob "${title}" scheduled` })
+      host.notify({ kind: 'success', message: translate('routines.scheduled', { name: title }) })
       reset()
       onClose()
     } catch (err) {
@@ -2403,9 +2746,9 @@ function CreateRoutineDialog({ bot, open, onClose }) {
       children: [
         jsxs(DialogHeader, {
           children: [
-            jsx(DialogTitle, { children: 'New Cronjob' }),
+            jsx(DialogTitle, { children: translate('routines.new') }),
             jsx(DialogDescription, {
-              children: `A recurring task ${displayName({ name: bot }, $botMeta.get()[bot])} runs on a schedule. Runs land in its own chat history.`
+              children: translate('routines.dialogDescription', { name: displayName({ name: bot }, $botMeta.get()[bot]) })
             })
           ]
         }),
@@ -2413,24 +2756,24 @@ function CreateRoutineDialog({ bot, open, onClose }) {
           className: 'grid gap-3.5',
           children: [
             labeled(
-              'Name',
+              translate('common.name'),
               jsx(Input, {
                 autoFocus: true,
-                placeholder: 'Name this cronjob',
+                placeholder: translate('routines.namePlaceholder'),
                 value: name,
                 onChange: event => setName(event.target.value)
               })
             ),
             labeled(
-              'Instruction',
+              translate('routines.instruction'),
               jsx(Textarea, {
                 className: 'min-h-20',
-                placeholder: 'What should this cronjob do each time it runs?',
+                placeholder: translate('routines.instructionPlaceholder'),
                 value: instruction,
                 onChange: event => setInstruction(event.target.value)
               })
             ),
-            labeled('When to run', jsx(SchedulePicker, { state: sched, setState: setSched })),
+            labeled(translate('routines.when'), jsx(SchedulePicker, { state: sched, setState: setSched })),
             error
               ? jsx('div', {
                   className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-xs text-(--ui-accent)',
@@ -2448,12 +2791,12 @@ function CreateRoutineDialog({ bot, open, onClose }) {
                 reset()
                 onClose()
               },
-              children: 'Cancel'
+              children: translate('common.cancel')
             }),
             jsx(Button, {
               disabled: busy || !name.trim() || !instruction.trim() || !schedule.trim(),
               onClick: submit,
-              children: busy ? 'Scheduling…' : 'Create Cronjob'
+              children: busy ? translate('routines.creating') : translate('routines.create')
             })
           ]
         })
@@ -2502,12 +2845,12 @@ function RoutinesPane() {
               }),
               jsx('div', {
                 className: 'text-[0.65rem] uppercase tracking-wider text-(--ui-text-quaternary)',
-                children: 'Cronjobs'
+                children: translate('panes.cronjobs')
               })
             ]
           }),
           jsx(Tip, {
-            label: 'New Cronjob',
+            label: translate('routines.new'),
             children: jsx('button', {
               type: 'button',
               className:
@@ -2531,13 +2874,13 @@ function RoutinesPane() {
                 jsx(Codicon, { name: 'calendar', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
                 jsx('div', {
                   className: 'text-xs leading-5 text-(--ui-text-tertiary)',
-                  children: 'Cronjobs are recurring tasks this agent runs on a schedule.'
+                  children: translate('routines.empty')
                 }),
                 jsx(Button, {
                   variant: 'secondary',
                   size: 'sm',
                   onClick: () => setCreateOpen(true),
-                  children: 'Create Cronjob'
+                  children: translate('routines.create')
                 })
               ]
             })
@@ -2588,10 +2931,10 @@ function BotsPane() {
         children: [
           jsx('span', {
             className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
-            children: 'Bots'
+            children: translate('panes.bots')
           }),
           jsx(Tip, {
-            label: 'New Agent',
+            label: translate('agents.new'),
             children: jsx('button', {
               type: 'button',
               className:
@@ -2613,23 +2956,23 @@ function BotsPane() {
               children: [
                 jsx('div', {
                   children: gatewayUp
-                    ? `Roster unavailable: ${error instanceof Error ? error.message : 'gateway error'}. If your gateway predates profiles.list, update Hermes and restart the gateway.`
-                    : 'Waiting for the gateway connection… (remote gateways can take a few seconds; retries automatically)'
+                    ? translate('roster.unavailable', { error: error instanceof Error ? error.message : translate('roster.gatewayError') })
+                    : translate('roster.waiting')
                 }),
                 jsx(Button, {
                   variant: 'secondary',
                   size: 'sm',
                   className: 'justify-self-start',
                   onClick: () => void refetch(),
-                  children: 'Retry now'
+                  children: translate('roster.retry')
                 })
               ]
             })
           : roster.length === 0
             ? jsx(EmptyState, {
                 icon: 'hubot',
-                title: 'No agents yet',
-                description: 'Create your first teammate.'
+                title: translate('agents.noAgentsTitle'),
+                description: translate('agents.noAgentsDescription')
               })
             : jsx(ScrollArea, {
                 className: 'min-h-0 flex-1',
@@ -2644,7 +2987,7 @@ function BotsPane() {
           className: 'w-full justify-center gap-1.5',
           variant: 'secondary',
           onClick: () => setCreateOpen(true),
-          children: [jsx(Codicon, { name: 'add' }), 'New Agent']
+          children: [jsx(Codicon, { name: 'add' }), translate('agents.new')]
         })
       }),
       jsx(CreateAgentDialog, {
@@ -2674,6 +3017,7 @@ export default {
   name: 'Bots',
   register(ctx) {
     pluginCtx = ctx
+    ctx.i18n.register(I18N_BUNDLES)
 
     // Keyframes for the pet bob — injected because plugin classes aren't in
     // the app's precompiled CSS. Idempotent across hot reloads.
@@ -2709,7 +3053,7 @@ export default {
     ctx.register({
       id: 'pane',
       area: 'panes',
-      title: 'Bots',
+      title: translate('panes.bots'),
       data: { placement: 'left', width: '260px' },
       render: () => jsx(BotsPane, {})
     })
@@ -2720,7 +3064,7 @@ export default {
     ctx.register({
       id: 'routines',
       area: 'panes',
-      title: 'Cronjobs',
+      title: translate('panes.cronjobs'),
       data: {
         placement: 'main',
         dock: { pane: 'workspace', pos: 'right' },
@@ -2734,10 +3078,10 @@ export default {
       area: PALETTE_AREA,
       data: {
         id: `${ID}.new-agent`,
-        label: 'New Agent…',
+        label: translate('agents.newEllipsis'),
         keywords: ['bot', 'agent', 'profile', 'teammate', 'create'],
         run: () => {
-          host.notify({ kind: 'info', message: 'Open the Bots pane and hit “New Agent”.' })
+          host.notify({ kind: 'info', message: translate('palette.openBots') })
         }
       }
     })
