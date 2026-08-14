@@ -12,6 +12,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 - **New Agent** — create a bot in seconds: name, title, description. An **Advanced** disclosure opens the full profile config: clone from an existing profile, pin a provider/model, write a custom SOUL.md, skip bundled skills.
 - **Edit Profile** (right-click a bot) — change the avatar, title, and description any time; its own Advanced section edits the live profile: per-skill and per-toolset enablement, model pin, and the full SOUL.md.
 - **Duplicate** (right-click) — full clone of a bot: config, skills, SOUL.md, memory, and its look.
+- **Delete Profile** (right-click) — permanently remove a bot after the same destructive confirmation used by Hermes Desktop's profile menu. The default profile cannot be deleted.
 - **Avatars** — cute geometric faces (7 shapes × 10 colors with blinking eyes that scan while the bot works), an uploaded image, an AI-generated portrait (when an image backend is configured), or a pixel **pet** companion that bounces beside the avatar while the bot is busy.
 - **Routines pane** — recurring tasks per bot, backed by Hermes cron. "Summarize my inbox every morning" lives next to the bot that does it. Runs land in the bot's own chat history.
 - **Bot-to-bot messaging** — every bot has a persistent **Agent Inbox** conversation. Bots message each other with attribution (`[Message from agent 'researcher']`), and their SOUL.md teaches them the protocol, including how to reply.
@@ -62,7 +63,6 @@ Then reload plugins in the Hermes desktop app (Ctrl+K → "Reload desktop plugin
 
 ## Notes
 
-- Deleting a profile is intentionally not exposed in the UI; use `hermes profile delete <name>`.
 - Bot-to-bot delivery is per-invocation (the receiving bot sees the message in its inbox when it next runs); live interrupt of a mid-conversation bot is upstream future work.
 - Avatar/pet customizations are stored in plugin storage; the profile itself stays clean.
 

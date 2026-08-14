@@ -27,6 +27,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -344,6 +345,45 @@ async function duplicateBot(bot, roster) {
   }
 
   return name
+}
+
+/** Permanently delete a bot's Hermes profile, then remove plugin-local state
+ * that would otherwise leave stale appearance/unread data behind. */
+async function deleteBot(bot) {
+  const result = await host.request('cli.exec', {
+    argv: ['profile', 'delete', bot.name, '--yes']
+  })
+
+  if (result?.blocked || result?.code !== 0) {
+    throw new Error(result?.hint || result?.output || `Could not delete profile ${bot.name}.`)
+  }
+
+  const meta = { ...$botMeta.get() }
+  delete meta[bot.name]
+  $botMeta.set(meta)
+
+  try {
+    await Promise.resolve(pluginCtx?.storage?.set?.('bot-meta', meta))
+  } catch {
+    /* profile is deleted; stale local appearance is harmless if storage fails */
+  }
+
+  const unread = { ...$botUnread.get() }
+  delete unread[bot.name]
+  $botUnread.set(unread)
+  rosterWatermarks.delete(bot.name)
+  avatarFetchInflight.delete(bot.name)
+  avatarPushInflight.delete(bot.name)
+
+  if ($selectedBot.get() === bot.name) {
+    $selectedBot.set('default')
+  }
+
+  queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
+
+  if (host.state.profile.get?.() === bot.name && typeof host.newChat === 'function') {
+    host.newChat('default')
+  }
 }
 
 // ── avatars (shape + color + eyes) ──────────────────────────────────────────
@@ -1395,7 +1435,7 @@ function composeSoul({ name, title, description, roster, customSoul }) {
 
 // ── bot row ──────────────────────────────────────────────────────────────────
 
-function BotRow({ bot, onEdit }) {
+function BotRow({ bot, onDelete, onEdit }) {
   const activeProfile = useValue(host.state.profile)
   const meta = useValue($botMeta)[bot.name]
   const last = bot.last_session
@@ -1541,7 +1581,15 @@ function BotRow({ bot, onEdit }) {
               }
             },
             children: 'New chat with this agent'
-          })
+          }),
+          bot.is_default ? null : jsx(ContextMenuSeparator, {}),
+          bot.is_default
+            ? null
+            : jsx(ContextMenuItem, {
+                onSelect: () => onDelete(bot),
+                variant: 'destructive',
+                children: 'Delete'
+              })
         ]
       })
     ]
@@ -3089,6 +3137,7 @@ function BotsPane() {
   const gatewayUp = useValue(host.state.gateway) === 'open'
   const [createOpen, setCreateOpen] = useState(false)
   const [editing, setEditing] = useState(null)
+  const [deleting, setDeleting] = useState(null)
 
   // The socket opening (boot, SSH reconnect, sleep/wake) is the signal to
   // retry immediately instead of waiting out the poll interval.
@@ -3201,7 +3250,9 @@ function BotsPane() {
                 className: 'hermes-bots-roster min-h-0 flex-1',
                 children: jsx('div', {
                   className: 'grid w-full min-w-0 gap-0.5 px-1.5 pb-2',
-                  children: roster.map(bot => jsx(BotRow, { bot, onEdit: setEditing }, bot.name))
+                  children: roster.map(bot =>
+                    jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing }, bot.name)
+                  )
                 })
               }),
       jsx('div', {
@@ -3227,6 +3278,36 @@ function BotsPane() {
         onClose: () => {
           setEditing(null)
           void refetch()
+        }
+      }),
+      jsx(ConfirmDialog, {
+        open: Boolean(deleting),
+        title: 'Delete bot and profile?',
+        description: deleting
+          ? jsxs('span', {
+              children: [
+                'This will permanently delete the bot ',
+                jsx('span', { className: 'font-medium text-foreground', children: deleting.name }),
+                ' and its associated Hermes profile at ',
+                jsx('span', { className: 'font-mono text-xs', children: deleting.path }),
+                '. This cannot be undone.'
+              ]
+            })
+          : null,
+        destructive: true,
+        confirmLabel: 'Delete',
+        busyLabel: 'Deleting…',
+        doneLabel: 'Deleted',
+        onClose: () => setDeleting(null),
+        onConfirm: async () => {
+          if (!deleting) {
+            return
+          }
+
+          const name = deleting.name
+          await deleteBot(deleting)
+          await refetch()
+          host.notify({ kind: 'success', message: `Deleted profile ${name}` })
         }
       })
     ]
