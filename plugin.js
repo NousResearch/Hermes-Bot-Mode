@@ -1408,6 +1408,18 @@ function BotRow({ bot, onEdit }) {
   const botMood = isActive && gatewayState === 'busy' ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
 
+  const warm = () => {
+    if (typeof host.warmProfile !== 'function') {
+      return
+    }
+
+    try {
+      host.warmProfile(bot.name)
+    } catch {
+      /* warm is best-effort */
+    }
+  }
+
   const open = async () => {
     haptic('tap')
     $selectedBot.set(bot.name)
@@ -1458,6 +1470,7 @@ function BotRow({ bot, onEdit }) {
 
   const row = jsxs('button', {
     type: 'button',
+    onPointerEnter: warm,
     onClick: open,
     className: cn(
       'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
@@ -3457,19 +3470,6 @@ function BotsPane() {
     mergeServerMeta(live)
     pullServerAvatars(live)
     trackInboundActivity(live)
-
-    // Pre-dial each bot's gateway socket so the first click doesn't pay
-    // the backend spawn + connect cost (SDK door from hermes-agent#85954;
-    // feature-detected — absent on older desktops, harmless to skip).
-    if (typeof host.warmProfile === 'function') {
-      for (const bot of live) {
-        try {
-          host.warmProfile(bot.name)
-        } catch {
-          /* warm is best-effort */
-        }
-      }
-    }
   }
 
   const staleNotice = error && !live && roster.length
