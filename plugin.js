@@ -68,6 +68,9 @@ let pluginCtx = null
 /** Live roster snapshot for imperative handlers (context menus). */
 const $lastRoster = atom([])
 
+/** Last good cron list, same idea as the roster snapshot. */
+const $lastJobs = atom([])
+
 /** Bot the Routines tile is scoped to. Follows the live gateway profile
  *  (the bot you're actually chatting with) and roster clicks. */
 const $selectedBot = atom('default')
@@ -2145,6 +2148,17 @@ function useRoutines() {
   })
 }
 
+/** Pick which cron jobs to show. A failed refresh keeps the last good list. */
+function selectRoutineJobs(data, error, lastJobs, bot) {
+  const live = Array.isArray(data?.jobs) ? data.jobs : null
+  const all = live ?? (error ? lastJobs : [])
+  return {
+    live,
+    all,
+    jobs: all.filter(job => routineBot(job) === bot)
+  }
+}
+
 function normalizedProfileName(profile) {
   return typeof profile === 'string' ? profile.trim().toLowerCase() : ''
 }
@@ -2619,9 +2633,16 @@ function RoutinesPane() {
   const bot = (gatewayProfile || selected || 'default').trim() || 'default'
   const meta = useValue($botMeta)[bot]
   const { shape, color, image } = botAppearance(bot, meta)
-  const { data, isLoading, refetch } = useRoutines()
+  const { data, error, isLoading, refetch } = useRoutines()
   const [createOpen, setCreateOpen] = useState(false)
-  const jobs = (data?.jobs ?? []).filter(job => routineBot(job) === bot)
+  const view = selectRoutineJobs(data, error, $lastJobs.get(), bot)
+  if (view.live) {
+    $lastJobs.set(view.live)
+  }
+  const jobs = view.jobs
+  const staleNotice = error && !view.live && view.all.length
+    ? 'Could not refresh cronjobs. Showing the last list we had.'
+    : null
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -2667,11 +2688,34 @@ function RoutinesPane() {
         ]
       }),
       jsx('div', { className: 'mx-3 border-t border-(--ui-stroke-secondary)' }),
-      isLoading
+      staleNotice
+        ? jsx('div', {
+            className: 'mx-3 mt-2 rounded-md bg-(--chrome-action-hover) px-2 py-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
+            children: staleNotice
+          })
+        : null,
+      isLoading && !view.all.length
         ? jsx('div', {
             className: 'flex flex-1 items-center justify-center',
             children: jsx(GlyphSpinner, { spinner: 'breathe', className: 'text-(--ui-text-tertiary)' })
           })
+        : error && !view.all.length
+          ? jsxs('div', {
+              className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
+              children: [
+                jsx(Codicon, { name: 'warning', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
+                jsx('div', {
+                  className: 'text-xs leading-5 text-(--ui-text-tertiary)',
+                  children: 'Could not load cronjobs. The list may still be there.'
+                }),
+                jsx(Button, {
+                  variant: 'secondary',
+                  size: 'sm',
+                  onClick: () => void refetch(),
+                  children: 'Retry'
+                })
+              ]
+            })
         : jobs.length === 0
           ? jsxs('div', {
               className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
