@@ -1163,6 +1163,41 @@ function createCanonicalChat(name) {
   return run
 }
 
+async function openBotCanonicalChat(name, pinned) {
+  let id = pinned
+
+  if (!id) {
+    return createCanonicalChat(name)
+  }
+
+  try {
+    const res = await host.request('session.list', { profile: name, limit: 100 })
+    const rows = res?.sessions ?? []
+
+    if (!rows.length) {
+      saveBotMeta(name, { chat: null })
+      return createCanonicalChat(name)
+    }
+
+    if (!rows.some(session => session.id === id)) {
+      id = rows[0].id
+      saveBotMeta(name, { chat: id })
+    }
+  } catch {
+    // Gateway hiccup — try the stored pin as-is.
+  }
+
+  try {
+    await host.openSession(id, { profile: name })
+    return id
+  } catch {
+    // A rejected resume means the pin is unusable even if list recovery was
+    // inconclusive. Clear it first so a failed replacement can be retried.
+    saveBotMeta(name, { chat: null })
+    return createCanonicalChat(name)
+  }
+}
+
 function displayName(bot, meta) {
   if (meta?.title?.trim()) {
     return meta.title.trim()
@@ -1268,37 +1303,17 @@ function BotRow({ bot, onEdit }) {
     haptic('tap')
     $selectedBot.set(bot.name)
 
-    let id = meta?.chat
+    try {
+      const id = await openBotCanonicalChat(bot.name, meta?.chat)
 
-    if (id) {
-      // Recovery: compaction rewrites lineage ids. If the pin no longer
-      // resolves, follow the lineage to the newest session that CONTINUES
-      // this chat; if the whole lineage is gone, mint a fresh canonical.
-      try {
-        const res = await host.request('session.list', { profile: bot.name, limit: 100 })
-        const rows = res?.sessions ?? []
-
-        if (rows.length && !rows.some(s => s.id === id)) {
-          id = rows[0].id
-          saveBotMeta(bot.name, { chat: id })
-        }
-      } catch {
-        // Gateway hiccup — try the pin as-is.
-      }
-    } else {
-      try {
-        id = await createCanonicalChat(bot.name)
-
-        // createCanonicalChat already opened the fresh session.
+      if (id) {
         return
-      } catch {
-        id = null
       }
+    } catch {
+      // Fall through to the older-gateway draft below.
     }
 
-    if (id && typeof host.openSession === 'function') {
-      void host.openSession(id, { profile: bot.name })
-    } else if (typeof host.newChat === 'function') {
+    if (typeof host.newChat === 'function') {
       // Older gateway without profile-scoped session.create — plain draft.
       host.newChat(bot.name)
     } else {
