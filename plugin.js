@@ -1139,20 +1139,34 @@ function createCanonicalChat(name) {
 
     // Mount the session view FIRST, then send the kickoff — submitting into
     // an unmounted session left the intro reply invisible until reopen.
+    let opened = false
+
     if (sid && typeof host.openSession === 'function') {
       try {
         await host.openSession(sid, { profile: name })
+        opened = true
       } catch {
-        // Navigation failure doesn't block the kickoff.
+        // The stored row may not exist until the kickoff persists it. Retry
+        // after prompt.submit below instead of leaving the chat off-screen.
       }
     }
 
     if (runtime) {
-      window.setTimeout(() => {
-        void host
-          .request('prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
-          .catch(() => undefined)
-      }, 400)
+      await new Promise(resolve => window.setTimeout(resolve, 400))
+
+      try {
+        await host.request('prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
+
+        if (!opened && sid && typeof host.openSession === 'function') {
+          await host.openSession(sid, { profile: name })
+        }
+      } catch (err) {
+        if (sid) {
+          saveBotMeta(name, { chat: null })
+        }
+
+        throw err
+      }
     }
 
     return sid || null
