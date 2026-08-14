@@ -73,6 +73,9 @@ const $lastRoster = atom([])
  *  delivery path: RPC, CLI (bot-to-bot), cron runs, other machines. */
 const $botUnread = atom({})
 
+/** Per-bot in-flight handoff. Independent of app-wide gateway busy. */
+const $botBusy = atom({})
+
 // last_active watermark per bot, seeded on first poll so a fresh mount
 // doesn't mark ancient history unread.
 const rosterWatermarks = new Map()
@@ -1325,56 +1328,41 @@ function slugify(value) {
     .slice(0, 64)
 }
 
-/** The agent-to-agent messaging protocol, reusable so a CUSTOM SOUL keeps
- *  the handoff protocol too — a custom SOUL used to silently drop it,
- *  breaking @mentions for customized bots (@wesleysimplicio, #16). */
+/** Teammate notice appended to every SOUL, including custom ones (#16).
+ *  Delivery is plugin-owned — this text must never teach `hermes -p`. */
 function messagingProtocolSection(name, roster) {
   const teammates = (roster || []).filter(b => b.name !== name)
+  const list = teammates.length
+    ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`).join('\n')
+    : '- (none yet)'
 
   return [
-    '## Messaging other agents',
+    '## Teammates',
     '',
-    'You work alongside other named agents. Every agent (including you) has',
-    'ONE canonical conversation titled "Bot Chat" — created with the agent,',
-    'so it always exists. Agent-to-agent messages are delivered straight',
-    'into it, like a DM. To message a teammate, run:',
+    `You are ${name}, a named agent on this machine.`,
+    'Other agents have their own chats. If a system line says a teammate asked you something, answer in this chat.',
+    'Never run `hermes -p` (or any terminal) to talk to teammates — the app delivers those messages.',
     '',
-    '```',
-    'hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + name + ' (@' + name + '): your message"',
-    '',
-    'Run the send with background=true and notify_on_complete=true on the',
-    'terminal tool, then finish your turn — the reply arrives later as a',
-    'background process notification. Never block waiting for it.',
-    '```',
-    '',
-    '(`--in ~ -c "Bot Chat"` resumes their canonical conversation in the home',
-    'workspace. `-Q` keeps output clean. Always open with the',
-    '"Message from \uD83E\uDD16 ' + name + ' (@' + name + '):" prefix so they know',
-    'who is talking (the @handle lets the app show your avatar to them).',
-    'Their reply prints to stdout — relay the relevant part back to the',
-    'user, and say which agent it came from. In the rare case the target',
-    'has no "Bot Chat" yet, send once WITHOUT -c, then',
-    '`hermes -p <agent-name> sessions rename <session-id> "Bot Chat"`.)',
-    '',
-    'If a message in YOUR chat starts with "Message from \uD83E\uDD16 <name>", it is',
-    'a teammate messaging you, not the user. Answer it directly — your reply',
-    'reaches them via their own delivery — and use the same command if you',
-    'need to start a conversation yourself.',
-    '',
-    'When the user writes @<agent-name> or says "ask <name> to ..." /',
-    '"tell <name> ...", that is a handoff: message that agent, wait for the',
-    'reply, and report back.',
-    '',
-    'The roster grows over time — run `hermes profiles list` for the LIVE',
-    'teammate list before a handoff. Teammates when you were created:',
-    ...(teammates.length
-      ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`)
-      : ['- (none yet)'])
+    'Teammates:',
+    list
   ].join('\n')
 }
 
-/** SOUL.md for a new bot: identity (or the user's custom SOUL) + the
- *  messaging protocol, which ALWAYS ships. */
+function parseRosterMentions(text, names, active) {
+  const prose = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
+  const mentioned = []
+  for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
+    let name = match[2].toLowerCase()
+    if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
+      name = 'default'
+    }
+    if (names.includes(name) && name !== active && !mentioned.includes(name)) {
+      mentioned.push(name)
+    }
+  }
+  return mentioned
+}
+
 function composeSoul({ name, title, description, roster, customSoul }) {
   if (customSoul && customSoul.trim()) {
     return customSoul.trim() + '\n\n' + messagingProtocolSection(name, roster)
@@ -1401,11 +1389,11 @@ function BotRow({ bot, onEdit }) {
   const last = bot.last_session
   const isActive = bot.name === activeProfile
   const { shape, color, image } = botAppearance(bot.name, meta)
-  // Reactive eyes: scan while this bot's backend is running a turn in the
-  // active window; calm otherwise. gatewayState is app-wide, so scope to the
-  // active profile's row only.
+  // Eyes scan while THIS bot is in-flight (plugin handoff or, if focused,
+  // the app-wide gateway). A busy researcher must not light up Staff.
   const gatewayState = useValue(host.state.gateway)
-  const botMood = isActive && gatewayState === 'busy' ? 'work' : 'idle'
+  const handoffBusy = Boolean(useValue($botBusy)[bot.name])
+  const botMood = handoffBusy || (isActive && gatewayState === 'busy') ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
 
   const open = async () => {
@@ -3676,10 +3664,34 @@ export default {
       }
     })
 
-    // @-mention middleware: "@<bot> do the thing" in any chat becomes an
-    // explicit handoff instruction the active agent's SOUL.md knows how to
-    // execute. Names are validated against the LIVE roster so
-    // "user@example.com" or an unknown @ passes through untouched.
+
+    async function deliverToBot(fromName, fromLabel, toName, userText) {
+      const payload = 'Message from ' + fromLabel + ' (@' + fromName + '): ' + userText
+      $botBusy.set({ ...$botBusy.get(), [toName]: true })
+      if ($selectedBot.get() !== toName) {
+        $botUnread.set({ ...$botUnread.get(), [toName]: true })
+      }
+      try {
+        await host.request('profiles.inbox.send', { from: fromName, to: toName, text: payload })
+        $botBusy.set({ ...$botBusy.get(), [toName]: false })
+        return
+      } catch {
+        // RPC may not exist yet — fall through to background CLI.
+      }
+      const run = argv => host.request('cli.exec', {
+        argv,
+        background: true,
+        notify_on_complete: true
+      })
+      try {
+        await run(['-p', toName, 'chat', '--in', '~', '-c', 'Bot Chat', '-Q', '-q', payload])
+      } catch {
+        await run(['-p', toName, 'chat', '--in', '~', '-Q', '-q', payload])
+      }
+    }
+
+    // @-mention middleware: the PLUGIN delivers to 1–2 roster bots.
+    // Unknown @ and email-like @ pass through. 3+ mentions refuse.
     ctx.register({
       id: 'mention-middleware',
       area: COMPOSER_AREAS.middleware,
@@ -3726,42 +3738,43 @@ export default {
             return draft
           }
 
-          // Mentions in code are code, not handoffs (#20).
-          const prose = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
           const active = (host.state.profile.get() || 'default').trim() || 'default'
-          const mentioned = []
-
-          for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
-            let name = match[2].toLowerCase()
-
-            if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
-              name = 'default'
-            }
-
-            if (names.includes(name) && name !== active && !mentioned.includes(name)) {
-              mentioned.push(name)
-            }
-          }
+          const mentioned = parseRosterMentions(text, names, active)
 
           if (!mentioned.length) {
             return draft
           }
 
-          // The ACTIVE BOT composes the message — it understands intent; a
-          // text pipe never can. Delivery is the one blessed command into the
-          // recipient's canonical Bot Chat, so their side reads as a normal
-          // DM (message bubble + their reply), and the reply prints on
-          // stdout for the sender to relay.
+          if (mentioned.length >= 3) {
+            host.notify({
+              kind: 'info',
+              title: 'Too many @mentions',
+              message: 'Split the ask — fan-out of three or more needs an explicit confirm. Nothing was sent.'
+            })
+            return draft
+          }
+
           const activeMeta = $botMeta.get()[active]
           const senderName = displayName({ name: active, title: activeMeta?.title }, activeMeta)
-          const note =
-            '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
-            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
-            mentioned.map(n => '`hermes -p ' + n + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + senderName + ' (@' + botHandle(active) + '): <your composed message>"`').join('\n') +
-            '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
-            'Relay the reply back to the user, attributed to that agent.]'
+          const handles = mentioned.map(botHandle).join(', ')
 
-          return { ...draft, text: text + note }
+          for (const to of mentioned) {
+            void deliverToBot(active, senderName, to, text).catch(err => {
+              $botBusy.set({ ...$botBusy.get(), [to]: false })
+              host.notifyError(err, 'Could not tell ' + botHandle(to))
+            })
+          }
+
+          host.notify({
+            kind: 'info',
+            title: mentioned.length === 1 ? ('Told ' + botHandle(mentioned[0])) : ('Told ' + handles),
+            message: 'They will answer in their own chat. This one stays free.'
+          })
+
+          return {
+            ...draft,
+            text: text + '\n\n[Already delivered to ' + handles + '. Acknowledge in one sentence. Do not message teammates via the terminal.]'
+          }
         }      }
     })
   }
