@@ -93,6 +93,11 @@ function trackInboundActivity(roster) {
       continue
     }
 
+    // A switched-off bot stays quiet: no unread badges, no toasts.
+    if (isBotDisabled(bot.name)) {
+      continue
+    }
+
     // Activity in the bot the user is currently looking at is already
     // visible — never badge the open chat.
     if ($selectedBot.get() === bot.name) {
@@ -159,6 +164,44 @@ function saveBotMeta(name, patch) {
     } catch {
       /* older gateway */
     }
+  }
+}
+
+/** A bot is OFF when its meta says enabled:false (absent = on). */
+function isBotDisabled(name) {
+  return $botMeta.get()[name]?.enabled === false
+}
+
+/** Flip a bot's on/off switch. OFF pauses its routines and silences its
+ *  inbound toasts (UI paths); chats stay open and readable. The flag
+ *  persists through bot meta — local storage AND server ui_meta, so it
+ *  follows the profile across machines. */
+async function setBotEnabled(name, enabled) {
+  saveBotMeta(name, { enabled })
+
+  try {
+    const res = await host.request('cron.manage', { action: 'list', include_disabled: true })
+    const jobs = (res?.jobs ?? []).filter(job => routineBot(job) === name)
+    const desired = enabled
+      ? job => job.enabled === false || job.state === 'paused'
+      : job => job.enabled !== false && job.state !== 'paused'
+    const results = await Promise.allSettled(
+      jobs
+        .filter(desired)
+        .map(job => host.request('cron.manage', { action: enabled ? 'resume' : 'pause', name: job.job_id }))
+    )
+    queryClient.invalidateQueries({ queryKey: ROUTINES_KEY })
+
+    const failed = results.filter(result => result.status === 'rejected').length
+
+    if (failed) {
+      host.notify({
+        kind: 'error',
+        message: `${displayName({ name }, $botMeta.get()[name])} is ${enabled ? 'on' : 'off'}, but ${failed} routine${failed === 1 ? '' : 's'} could not be ${enabled ? 'resumed' : 'paused'}.`
+      })
+    }
+  } catch {
+    // Older gateway without cron RPCs — the switch state still persists.
   }
 }
 
@@ -1456,13 +1499,20 @@ function BotRow({ bot, onEdit }) {
     }
   }
 
-  const row = jsxs('button', {
+  // On/off: OFF pauses this bot's routines and makes its @handle pass
+  // through as literal text; the chat stays open and readable. The flag
+  // persists via bot meta (local storage + server ui_meta).
+  const enabled = meta?.enabled !== false
+
+  const openArea = jsxs('button', {
     type: 'button',
-    onClick: open,
+    onClick: event => {
+      event.stopPropagation()
+      void open()
+    },
     className: cn(
-      'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
-      'hover:bg-(--chrome-action-hover)',
-      isActive && 'bg-(--chrome-action-hover)'
+      'flex min-w-0 flex-1 items-center gap-2.5 overflow-hidden rounded-md py-2 pl-2 pr-1 text-left transition-opacity',
+      !enabled && 'opacity-60'
     ),
     children: [
       jsx('div', {
@@ -1509,6 +1559,27 @@ function BotRow({ bot, onEdit }) {
             children: last?.preview || bot.description || 'No conversations yet — say hi'
           })
         ]
+      })
+    ]
+  })
+
+  const row = jsxs('div', {
+    onClick: () => void open(),
+    className: cn(
+      'flex w-full min-w-0 max-w-full items-center gap-1 overflow-hidden rounded-md transition-colors',
+      'hover:bg-(--chrome-action-hover)',
+      isActive && 'bg-(--chrome-action-hover)'
+    ),
+    children: [
+      openArea,
+      jsx('div', {
+        className: 'shrink-0 pr-1.5',
+        onClick: event => event.stopPropagation(),
+        children: jsx(Switch, {
+          checked: enabled,
+          'aria-label': `${displayName(bot, meta)} is ${enabled ? 'on' : 'off'}`,
+          onCheckedChange: value => void setBotEnabled(bot.name, Boolean(value))
+        })
       })
     ]
   })
@@ -3351,9 +3422,15 @@ export default {
           }
 
           let names = []
+          let rosterMeta = {}
           try {
             const res = await host.request('profiles.list', { include_sessions: false })
             names = (res?.profiles ?? []).map(p => p.name)
+            // Server-side ui_meta is the freshest on/off source; local
+            // $botMeta covers older gateways that lack ui_meta.
+            rosterMeta = Object.fromEntries(
+              (res?.profiles ?? []).map(p => [p.name, p.ui_meta?.['hermes-bots'] || {}])
+            )
           } catch {
             return draft
           }
@@ -3371,7 +3448,12 @@ export default {
             }
 
             if (names.includes(name) && name !== active && !mentioned.includes(name)) {
-              mentioned.push(name)
+              // A bot switched OFF is not a teammate — its @handle stays
+              // literal text so nobody handoffs to a sleeping bot.
+              const meta = rosterMeta[name] || $botMeta.get()[name] || {}
+              if (meta.enabled !== false) {
+                mentioned.push(name)
+              }
             }
           }
 
