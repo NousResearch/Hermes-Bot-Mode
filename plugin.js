@@ -1120,12 +1120,26 @@ const canonicalCreations = new Map()
 /** Create the bot's ONE forever chat: a real session opened with a kickoff
  *  message (the gateway prunes zero-message sessions, so the chat is born
  *  with the bot introducing itself). Pins the stored id in bot meta and
- *  returns it. */
-function createCanonicalChat(name) {
+ *  returns it.
+ *
+ *  opts.navigate / opts.kickoff default on. Mentions turn both off so a
+ *  background delivery does not steal the current chat or fire the intro. */
+function createCanonicalChat(name, opts = {}) {
+  const navigate = opts.navigate !== false
+  const kickoff = opts.kickoff !== false
   const inflight = canonicalCreations.get(name)
 
   if (inflight) {
-    return inflight
+    return inflight.then(async sid => {
+      if (navigate && sid && typeof host.openSession === 'function') {
+        try {
+          await host.openSession(sid, { profile: name })
+        } catch {
+          /* already open, or gone */
+        }
+      }
+      return sid
+    })
   }
 
   const run = (async () => {
@@ -1139,7 +1153,7 @@ function createCanonicalChat(name) {
 
     // Mount the session view FIRST, then send the kickoff — submitting into
     // an unmounted session left the intro reply invisible until reopen.
-    if (sid && typeof host.openSession === 'function') {
+    if (navigate && sid && typeof host.openSession === 'function') {
       try {
         await host.openSession(sid, { profile: name })
       } catch {
@@ -1147,7 +1161,7 @@ function createCanonicalChat(name) {
       }
     }
 
-    if (runtime) {
+    if (kickoff && runtime) {
       window.setTimeout(() => {
         void host
           .request('prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
@@ -2972,7 +2986,15 @@ export default {
           // chat is open it streams live.
           const senderMeta = $botMeta.get()[active]
           const sender = displayName({ name: active, title: senderMeta?.title }, senderMeta)
-          const cleaned = text.replace(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi, (m, pre, n) => pre + botHandle(n)).trim()
+          // Only rewrite handles we actually handed off. Other @tokens
+          // (emails after a space, code names) keep their @.
+          const cleaned = text.replace(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi, (m, pre, n) => {
+            let name = n.toLowerCase()
+            if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
+              name = 'default'
+            }
+            return mentioned.includes(name) ? pre + botHandle(n) : m
+          }).trim()
 
           for (const target of mentioned) {
             void (async () => {
@@ -2980,12 +3002,15 @@ export default {
                 let sid = $botMeta.get()[target]?.chat
 
                 if (!sid) {
-                  const rows = await host.request('session.list', { profile: target, limit: 50 })
+                  const rows = await host.request('session.list', { profile: target, limit: 200 })
                   sid = (rows?.sessions ?? []).find(s => s.title === 'Bot Chat')?.id || null
+                  if (sid) {
+                    saveBotMeta(target, { chat: sid })
+                  }
                 }
 
                 if (!sid) {
-                  sid = await createCanonicalChat(target)
+                  sid = await createCanonicalChat(target, { navigate: false, kickoff: false })
                 }
 
                 if (!sid) {
