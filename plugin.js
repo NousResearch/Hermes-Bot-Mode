@@ -2126,6 +2126,8 @@ function CreateAgentDialog({ open, onClose, roster }) {
 // hermes -p <bot> chat delegation wrapper so the run reaches that bot's
 // history. The tile follows the bot you're chatting with (gateway profile).
 const BOT_TAG_RE = /^\[bot:([a-z0-9][a-z0-9_-]*)\]\s*/i
+const SAFE_ROUTINE_MARKER = '[bot-mode:routine:v2] '
+const LEGACY_DELEGATED_ROUTINE_PREFIX = 'You are running the scheduled routine "'
 
 function routineBot(job) {
   const match = BOT_TAG_RE.exec(job?.name || '')
@@ -2136,10 +2138,37 @@ function routineTitle(job) {
   return (job?.name || '').replace(BOT_TAG_RE, '') || 'Untitled cronjob'
 }
 
+function isLegacyDelegatedRoutine(job) {
+  const preview = typeof job?.prompt_preview === 'string' ? job.prompt_preview : job?.prompt
+  return Boolean(routineBot(job) && typeof preview === 'string' && preview.startsWith(LEGACY_DELEGATED_ROUTINE_PREFIX))
+}
+
+async function loadRoutines() {
+  const data = await host.request('cron.manage', { action: 'list', include_disabled: true })
+  const jobs = Array.isArray(data?.jobs) ? data.jobs : []
+  const activeLegacyJobs = jobs.filter(
+    job => isLegacyDelegatedRoutine(job) && job.enabled !== false && job.state !== 'paused'
+  )
+
+  await Promise.all(
+    activeLegacyJobs.map(job => host.request('cron.manage', { action: 'pause', name: job.job_id }))
+  )
+
+  if (!activeLegacyJobs.length) {
+    return data
+  }
+
+  const pausedIds = new Set(activeLegacyJobs.map(job => job.job_id))
+  return {
+    ...data,
+    jobs: jobs.map(job => (pausedIds.has(job.job_id) ? { ...job, enabled: false, state: 'paused' } : job))
+  }
+}
+
 function useRoutines() {
   return useQuery({
     queryKey: ROUTINES_KEY,
-    queryFn: () => host.request('cron.manage', { action: 'list', include_disabled: true }),
+    queryFn: loadRoutines,
     refetchInterval: 20000,
     staleTime: 8000
   })
@@ -2153,13 +2182,25 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`
 }
 
+function routineInputError(title, instruction) {
+  if (String(title).includes('\0')) {
+    return 'Cronjob name cannot contain NUL (U+0000).'
+  }
+
+  if (String(instruction).includes('\0')) {
+    return 'Cronjob instruction cannot contain NUL (U+0000).'
+  }
+
+  return null
+}
+
 function routinePrompt(bot, title, instruction, activeProfile) {
   if (normalizedProfileName(bot) && normalizedProfileName(bot) === normalizedProfileName(activeProfile)) {
     return instruction
   }
 
   return (
-    `You are running the scheduled routine "${title}" for agent '${bot}'. ` +
+    `${SAFE_ROUTINE_MARKER}You are running the scheduled routine "${title}" for agent '${bot}'. ` +
     `Execute it AS that agent so the run lands in its own history: run this in the terminal and relay the output:\n\n` +
     `hermes -p ${shellQuote(bot)} chat -c ${shellQuote(`Routine: ${title}`)} -q ${shellQuote(`[Scheduled routine] ${instruction}`)}\n\n` +
     `If the command fails, report the error instead.`
@@ -2204,7 +2245,8 @@ function RoutineRow({ job, onChanged }) {
   // Optimistic overlay: null = trust server state. Set immediately on
   // toggle so the switch responds even before the refetch lands.
   const [pendingActive, setPendingActive] = useState(null)
-  const serverActive = job.enabled !== false && job.state !== 'paused'
+  const legacyUnsafe = isLegacyDelegatedRoutine(job)
+  const serverActive = !legacyUnsafe && job.enabled !== false && job.state !== 'paused'
   const active = pendingActive === null ? serverActive : pendingActive
 
   if (pendingActive !== null && pendingActive === serverActive) {
@@ -2252,7 +2294,7 @@ function RoutineRow({ job, onChanged }) {
           }),
           jsx(Switch, {
             checked: active,
-            disabled: busy,
+            disabled: busy || legacyUnsafe,
             onCheckedChange: value => act(value ? 'resume' : 'pause')
           }),
           jsx(Tip, {
@@ -2281,7 +2323,14 @@ function RoutineRow({ job, onChanged }) {
             children: active && job.next_run_at ? `next ${relativeTime(new Date(job.next_run_at).getTime())}` : 'paused'
           })
         ]
-      })
+      }),
+      legacyUnsafe
+        ? jsx('div', {
+            className:
+              'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-[0.65rem] leading-4 text-(--ui-accent)',
+            children: 'Paused for security: delete and recreate this legacy cronjob before running it again.'
+          })
+        : null
     ]
   })
 }
@@ -2512,6 +2561,12 @@ function CreateRoutineDialog({ bot, open, onClose }) {
   const submit = async () => {
     const title = name.trim()
     const task = instruction.trim()
+    const inputError = routineInputError(title, task)
+
+    if (inputError) {
+      setError(inputError)
+      return
+    }
 
     if (!title || !task || !schedule.trim() || busy) {
       return
