@@ -15,6 +15,7 @@
  * bot-initiated sends use `hermes -p <bot> chat --in ~ -c "Bot Chat"`.
  */
 
+import * as sdk from '@hermes/plugin-sdk'
 import {
   atom,
   Button,
@@ -39,7 +40,6 @@ import {
   haptic,
   host,
   Input,
-  McpTab,
   PALETTE_AREA,
   profileColor,
   queryClient,
@@ -54,12 +54,13 @@ import {
   Switch,
   Textarea,
   Tip,
-  ToolsetConfigPanel,
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
+
+const { McpTab, ToolsetConfigPanel } = sdk
 
 const ID = 'hermes-bots'
 const ROSTER_KEY = [ID, 'roster']

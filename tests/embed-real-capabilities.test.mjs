@@ -10,10 +10,9 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
 
-test('imports the real Capabilities components from the SDK', () => {
-  const importBlock = source.slice(0, source.indexOf("} from '@hermes/plugin-sdk'"))
-  assert.match(importBlock, /\bMcpTab\b/)
-  assert.match(importBlock, /\bToolsetConfigPanel\b/)
+test('resolves optional Capabilities components from the SDK namespace', () => {
+  assert.match(source, /import \* as sdk from '@hermes\/plugin-sdk'/)
+  assert.match(source, /const \{ McpTab, ToolsetConfigPanel \} = sdk/)
 })
 
 test('AdvancedProfileConfig embeds ToolsetConfigPanel per toolset, scoped to the bot profile', () => {
