@@ -4089,15 +4089,25 @@ async function loadRoutines(profile) {
     job => isLegacyDelegatedRoutine(job) && job.enabled !== false && job.state !== 'paused'
   )
 
-  await Promise.all(
-    activeLegacyJobs.map(job => host.request('cron.manage', { action: 'pause', name: job.job_id, ...scope }))
+  // A pause failing must not fail the LIST — the pane would report "could
+  // not load cronjobs" over data that loaded fine, and the 20s poll would
+  // re-attempt the failing pause inside a failing query forever. Each pause
+  // swallows its own error; the overlay only claims jobs the gateway
+  // actually paused, and the next poll retries the rest.
+  const pauses = await Promise.all(
+    activeLegacyJobs.map(job =>
+      host
+        .request('cron.manage', { action: 'pause', name: job.job_id, ...scope })
+        .then(() => true)
+        .catch(() => false)
+    )
   )
 
   if (!activeLegacyJobs.length) {
     return data
   }
 
-  const pausedIds = new Set(activeLegacyJobs.map(job => job.job_id))
+  const pausedIds = new Set(activeLegacyJobs.filter((job, index) => pauses[index]).map(job => job.job_id))
   return {
     ...data,
     jobs: jobs.map(job => (pausedIds.has(job.job_id) ? { ...job, enabled: false, state: 'paused' } : job))
