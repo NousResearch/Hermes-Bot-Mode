@@ -46,4 +46,19 @@ test('pet gallery paginates six pets per page and clamps page bounds', () => {
     currentPage: 2,
     visible: [12]
   })
+  assert.deepEqual(normalize(paginatePets(pets, -2.8)), {
+    pageCount: 3,
+    currentPage: 0,
+    visible: [0, 1, 2, 3, 4, 5]
+  })
+  assert.deepEqual(normalize(paginatePets(pets, Number.NaN)), {
+    pageCount: 3,
+    currentPage: 0,
+    visible: [0, 1, 2, 3, 4, 5]
+  })
+  assert.deepEqual(normalize(paginatePets([], 4)), {
+    pageCount: 0,
+    currentPage: 0,
+    visible: []
+  })
 })

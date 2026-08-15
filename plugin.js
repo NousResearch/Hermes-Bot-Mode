@@ -1666,7 +1666,8 @@ const PET_PAGE_SIZE = 6
 
 function paginatePets(pets, page) {
   const pageCount = Math.ceil(pets.length / PET_PAGE_SIZE)
-  const currentPage = Math.min(Math.max(page, 0), Math.max(0, pageCount - 1))
+  const requestedPage = Number.isFinite(page) ? Math.trunc(page) : 0
+  const currentPage = Math.min(Math.max(requestedPage, 0), Math.max(0, pageCount - 1))
   return {
     pageCount,
     currentPage,
