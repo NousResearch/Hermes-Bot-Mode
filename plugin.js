@@ -359,7 +359,9 @@ if (typeof document !== 'undefined' && !document.getElementById('hermes-bots-ros
   style.id = 'hermes-bots-roster-css'
   style.textContent =
     '.hermes-bots-roster [data-radix-scroll-area-viewport] > div {' +
-    ' display: block !important; width: 100%; min-width: 0; }'
+    ' display: block !important; width: 100%; min-width: 0; }' +
+    '@keyframes hermes-bots-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }' +
+    '.hermes-bots-pulse { animation: hermes-bots-pulse 1.2s ease-in-out infinite; }'
   document.head.appendChild(style)
 }
 
@@ -1607,6 +1609,62 @@ function composeSoul({ name, title, description, roster, customSoul }) {
   return lines.filter(line => line !== null).join('\n') + '\n\n' + messagingProtocolSection(name, roster)
 }
 
+// ── human-readable row helpers ───────────────────────────────────────────────
+
+/** Bot-to-bot delivery prefix (see messagingProtocolSection): either the
+ *  current "Message from 🤖 name (@handle):" form or the older
+ *  "[Message from agent 'name']" shape. Captures the sender's handle. */
+const A2A_RE = /^Message from (?:agent '([^']+)'|🤖\s*([^\s(@]+))/i
+
+/** Strip the delivery prefix so a DM preview reads like a DM, not a log line. */
+const A2A_PREFIX_RE = /^Message from (?:agent '[^']+'|🤖[^:]+):\s*/i
+
+/** Classify a roster preview: `{ fromBot: handle|null }`. A preview that
+ *  starts with the delivery prefix is a bot-to-bot message — the receiving
+ *  bot's row should show WHO sent it, not present it as the human's chat. */
+function previewKind(preview) {
+  const text = (preview || '').trim()
+  if (!text) {
+    return { fromBot: null }
+  }
+  const match = text.match(A2A_RE)
+  if (match) {
+    return { fromBot: (match[1] || match[2] || '').trim().toLowerCase() || null }
+  }
+  return { fromBot: null }
+}
+
+/** Session titles the gateway auto-assigns that carry no information. */
+const GENERIC_TITLES = new Set(['', 'bot chat', 'new chat', 'new conversation', 'conversation', 'chat', 'untitled'])
+
+function isGenericTitle(title) {
+  return GENERIC_TITLES.has((title || '').trim().toLowerCase())
+}
+
+/** Title for the session chip: the real session title when it means
+ *  something, otherwise a short label generated from the newest message
+ *  (delivery prefixes stripped) so "Bot Chat" rows still say what the
+ *  conversation is actually about. */
+function generatedSessionTitle(session, preview) {
+  const raw = (session?.title || '').trim()
+  if (raw && !isGenericTitle(raw)) {
+    return raw
+  }
+  const cleaned = (preview || '').trim().replace(A2A_PREFIX_RE, '').trim()
+  if (!cleaned) {
+    return raw || 'Conversation'
+  }
+  const words = cleaned.split(/\s+/).slice(0, 5).join(' ').replace(/[,;:.]+$/, '')
+  if (!words) {
+    return raw || 'Conversation'
+  }
+  return words.length > 34 ? `${words.slice(0, 33)}…` : words
+}
+
+/** Roster liveness window: a bot whose last message landed within this many
+ *  seconds is treated as "active now" (pulsing dot in its row). */
+const ACTIVE_WINDOW_S = 90
+
 // ── bot row ──────────────────────────────────────────────────────────────────
 
 function BotRow({ bot, onEdit }) {
@@ -1621,6 +1679,44 @@ function BotRow({ bot, onEdit }) {
   const gatewayState = useValue(host.state.gateway)
   const botMood = isActive && gatewayState === 'busy' ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
+  // Human-readable session context: WHICH chat the preview belongs to, WHO
+  // sent the last message (bot-to-bot DM vs human), and whether the bot is
+  // actively writing right now (last_active within the liveness window).
+  const { fromBot } = previewKind(last?.preview)
+  const sessionLabel = last ? generatedSessionTitle(last, last?.preview) : null
+  const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [history, setHistory] = useState(null)
+  const [historyError, setHistoryError] = useState(false)
+  const lastActiveKey = last?.last_active || 0
+  // Lazy per-bot history: fetched once on first expand, re-fetched while
+  // open whenever the bot writes a new message. Six rows max, gateway-side.
+  useEffect(() => {
+    if (!historyOpen) {
+      return undefined
+    }
+    let cancelled = false
+    host
+      .request('session.list', { profile: bot.name, limit: 6 })
+      .then(res => {
+        if (!cancelled) {
+          setHistory(res?.sessions ?? [])
+          setHistoryError(false)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistoryError(true)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [historyOpen, bot.name, lastActiveKey])
+  // DM previews read like DMs: strip the delivery prefix, keep the message.
+  const displayPreview = fromBot
+    ? (last?.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…'
+    : last?.preview || bot.description || 'No conversations yet — say hi'
 
   const open = async () => {
     haptic('tap')
@@ -1717,6 +1813,12 @@ function BotRow({ bot, onEdit }) {
                     'aria-label': 'unread'
                   })
                 : null,
+              activeNow
+                ? jsx('span', {
+                    className: 'hermes-bots-pulse size-1.5 shrink-0 rounded-full bg-(--ui-accent,#4f9cf9)',
+                    title: 'Active in the last 90s'
+                  })
+                : null,
               last
                 ? jsx('span', {
                     className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
@@ -1725,10 +1827,105 @@ function BotRow({ bot, onEdit }) {
                 : null
             ]
           }),
+          sessionLabel
+            ? jsxs('div', {
+                className: 'mt-0.5 flex min-w-0 items-center gap-1',
+                children: [
+                  jsxs('span', {
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-expanded': historyOpen,
+                    title: historyOpen ? 'Hide session history' : 'Show session history',
+                    className:
+                      'flex min-w-0 max-w-full cursor-pointer select-none items-center gap-0.5 rounded px-1 py-px text-[0.65rem] text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-(--ui-text-secondary)',
+                    onClick: event => {
+                      event.stopPropagation()
+                      setHistoryOpen(open => !open)
+                    },
+                    onKeyDown: event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setHistoryOpen(open => !open)
+                      }
+                    },
+                    children: [
+                      jsx(Codicon, {
+                        name: historyOpen ? 'chevron-down' : 'chevron-right',
+                        className: 'shrink-0'
+                      }),
+                      jsx('span', { className: 'truncate', children: sessionLabel })
+                    ]
+                  }),
+                  fromBot
+                    ? jsxs('span', {
+                        className:
+                          'flex shrink-0 items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium text-(--ui-accent,#4f9cf9)',
+                        title: `Last message came from @${fromBot} (bot-to-bot)`,
+                        children: ['🤖', `@${fromBot}`]
+                      })
+                    : null
+                ]
+              })
+            : null,
           jsx('div', {
-            className: 'truncate text-xs text-(--ui-text-tertiary)',
-            children: last?.preview || bot.description || 'No conversations yet — say hi'
-          })
+            className: fromBot
+              ? 'truncate text-xs italic text-(--ui-accent,#4f9cf9)'
+              : 'truncate text-xs text-(--ui-text-tertiary)',
+            children: displayPreview
+          }),
+          historyOpen
+            ? jsxs('div', {
+                className: 'mt-1 flex flex-col gap-0.5 border-l border-(--ui-stroke-secondary) pl-2',
+                children: [
+                  historyError
+                    ? jsx('span', {
+                        className: 'text-[0.65rem] text-(--ui-text-quaternary)',
+                        children: 'Could not load history.'
+                      })
+                    : history === null
+                      ? jsx('span', {
+                          className: 'text-[0.65rem] text-(--ui-text-quaternary)',
+                          children: 'Loading…'
+                        })
+                      : history.length === 0
+                        ? jsx('span', {
+                            className: 'text-[0.65rem] text-(--ui-text-quaternary)',
+                            children: 'No past sessions.'
+                          })
+                        : history.map(s =>
+                            jsxs(
+                              'div',
+                              {
+                                className: 'flex min-w-0 items-baseline justify-between gap-2',
+                                children: [
+                                  jsxs('div', {
+                                    className: 'flex min-w-0 items-baseline gap-1',
+                                    children: [
+                                      s.id === last?.id
+                                        ? jsx('span', {
+                                            className: 'size-1 shrink-0 self-center rounded-full bg-(--ui-accent,#4f9cf9)',
+                                            title: 'Current chat'
+                                          })
+                                        : null,
+                                      jsx('span', {
+                                        className: 'truncate text-[0.65rem] text-(--ui-text-secondary)',
+                                        children: s.title || generatedSessionTitle(s, s.preview) || 'Conversation'
+                                      })
+                                    ]
+                                  }),
+                                  jsx('span', {
+                                    className: 'shrink-0 text-[0.625rem] text-(--ui-text-quaternary)',
+                                    children: relativeTime((s.started_at || 0) * 1000)
+                                  })
+                                ]
+                              },
+                              s.id
+                            )
+                          )
+                ]
+              })
+            : null
         ]
       })
     ]
