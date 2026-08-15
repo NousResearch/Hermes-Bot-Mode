@@ -5267,7 +5267,20 @@ export default {
         label: 'New Agent…',
         keywords: ['bot', 'agent', 'profile', 'teammate', 'create'],
         run: () => {
-          host.notify({ kind: 'info', message: 'Open the Bots pane and hit “New Agent”.' })
+          host.notify({ kind: 'info', message: 'Open the Bots pane and hit "New Agent".' })
+        }
+      }
+    })
+
+    ctx.register({
+      id: 'a2a-feedback-cmd',
+      area: PALETTE_AREA,
+      data: {
+        id: `${ID}.a2a-feedback-cmd`,
+        label: 'A2A Feedback',
+        keywords: ['a2a', 'feedback', 'heartbeat', 'bot results'],
+        run: () => {
+          host.notify({ kind: 'info', message: 'Open the A2A Feedback pane from the sidebar.' })
         }
       }
     })
