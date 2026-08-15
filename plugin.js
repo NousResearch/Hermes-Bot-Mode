@@ -77,6 +77,16 @@ const $lastRoster = atom([])
  *  delivery path: RPC, CLI (bot-to-bot), cron runs, other machines. */
 const $botUnread = atom({})
 
+/** Per-bot in-flight handoff. Independent of app-wide gateway busy. */
+const $botBusy = atom({})
+
+const $handoffs = atom([])
+
+/** Injected Staff/origin lines. Live $messages dies on bot switch, so we
+ *  reprint these when the origin chat is shown again. */
+const $originPrints = atom([])
+const onScreenPrints = new Set()
+
 // last_active watermark per bot, seeded on first poll so a fresh mount
 // doesn't mark ancient history unread.
 const rosterWatermarks = new Map()
@@ -97,21 +107,34 @@ function trackInboundActivity(roster) {
       continue
     }
 
+    const preview = (bot.last_session?.preview || '').trim()
+    const handed = ($handoffs.get() || []).some(row => String(row.target || '').toLowerCase() === String(bot.name || '').toLowerCase())
+    if (handed && preview) {
+      $handoffs.set(($handoffs.get() || []).map(row => {
+        if (String(row.target || '').toLowerCase() !== String(bot.name || '').toLowerCase()) return row
+        if (row.status !== 'sent') return row
+        return { ...row, progress: preview }
+      }))
+    }
+
     // Activity in the bot the user is currently looking at is already
     // visible — never badge the open chat.
     if ($selectedBot.get() === bot.name) {
       continue
     }
 
+    // Teammate handoffs stay mute. No toast, no unread.
+    if (handed || /^Message from/i.test(preview)) {
+      continue
+    }
+
     const meta = $botMeta.get()[bot.name]
     const label = displayName(bot, meta)
-    const preview = (bot.last_session?.preview || '').trim()
-    const inbound = /^Message from/i.test(preview)
 
     $botUnread.set({ ...$botUnread.get(), [bot.name]: true })
     host.notify({
       kind: 'info',
-      title: inbound ? `\uD83E\uDD16 New message for ${label}` : `${label} has new activity`,
+      title: `${label} has new activity`,
       message: preview.slice(0, 140) || 'Open the chat to see it.'
     })
   }
@@ -2074,46 +2097,21 @@ function slugify(value) {
  *  breaking @mentions for customized bots (@wesleysimplicio, #16). */
 function messagingProtocolSection(name, roster) {
   const teammates = (roster || []).filter(b => b.name !== name)
+  const list = teammates.length
+    ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`).join('\n')
+    : '- (none yet)'
 
   return [
-    '## Messaging other agents',
+    '## Teammates',
     '',
-    'You work alongside other named agents. Every agent (including you) has',
-    'ONE canonical conversation titled "Bot Chat" — created with the agent,',
-    'so it always exists. Agent-to-agent messages are delivered straight',
-    'into it, like a DM. To message a teammate, run:',
+    `You are ${name}, a named agent on this machine.`,
+    name === 'staff' || name === 'default'
+      ? 'You are the chief of staff. You are the only mouth the user hears. Teammates work silently; their answers are printed here. If a message was meant for another agent, stay quiet.'
+      : 'If a system line says a teammate asked you something, answer in this chat. Do not address the user in another bot session.',
+    'Never run `hermes -p` (or any terminal) to talk to teammates — the app delivers those messages.',
     '',
-    '```',
-    'hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + name + ' (@' + name + '): your message"',
-    '',
-    'Run the send with background=true and notify_on_complete=true on the',
-    'terminal tool, then finish your turn — the reply arrives later as a',
-    'background process notification. Never block waiting for it.',
-    '```',
-    '',
-    '(`--in ~ -c "Bot Chat"` resumes their canonical conversation in the home',
-    'workspace. `-Q` keeps output clean. Always open with the',
-    '"Message from \uD83E\uDD16 ' + name + ' (@' + name + '):" prefix so they know',
-    'who is talking (the @handle lets the app show your avatar to them).',
-    'Their reply prints to stdout — relay the relevant part back to the',
-    'user, and say which agent it came from. In the rare case the target',
-    'has no "Bot Chat" yet, send once WITHOUT -c, then',
-    '`hermes -p <agent-name> sessions rename <session-id> "Bot Chat"`.)',
-    '',
-    'If a message in YOUR chat starts with "Message from \uD83E\uDD16 <name>", it is',
-    'a teammate messaging you, not the user. Answer it directly — your reply',
-    'reaches them via their own delivery — and use the same command if you',
-    'need to start a conversation yourself.',
-    '',
-    'When the user writes @<agent-name> or says "ask <name> to ..." /',
-    '"tell <name> ...", that is a handoff: message that agent, wait for the',
-    'reply, and report back.',
-    '',
-    'The roster grows over time — run `hermes profiles list` for the LIVE',
-    'teammate list before a handoff. Teammates when you were created:',
-    ...(teammates.length
-      ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`)
-      : ['- (none yet)'])
+    'Teammates:',
+    list
   ].join('\n')
 }
 
@@ -2195,6 +2193,468 @@ const ACTIVE_WINDOW_S = 90
 
 // ── bot row ──────────────────────────────────────────────────────────────────
 
+function parseRosterMentions(text, names, active) {
+  const prose = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
+  const mentioned = []
+  for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
+    let name = match[2].toLowerCase()
+    if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
+      name = 'default'
+    }
+    if (names.includes(name) && name !== active && !mentioned.includes(name)) {
+      mentioned.push(name)
+    }
+  }
+  return mentioned
+}
+
+function transcriptText(msg) {
+  if (!msg) {
+    return ""
+  }
+  const raw = msg.content ?? msg.text ?? ""
+  if (typeof raw === "string") {
+    return raw
+  }
+  if (Array.isArray(raw)) {
+    return raw.map(part => {
+      if (typeof part === "string") {
+        return part
+      }
+      if (part && typeof part.text === "string") {
+        return part.text
+      }
+      return ""
+    }).join("")
+  }
+  return ""
+}
+
+function formatTeammateNotice(senderLabel, senderId, body) {
+  const label = String(senderLabel || senderId || "agent").trim() || "agent"
+  const handle = String(senderId || "agent").trim() || "agent"
+  const text = String(body || "").trim()
+  return `Message from ${label} (@${handle}): ${text}`
+}
+
+const TEAMMATE_NOTICE_RE =
+  /^(?:Message from (?:🤖\s*)?([^:\n(]{1,64}?)(?:\s*\(@([a-z0-9][a-z0-9_-]{0,63})\))?:\s*|\[Message from agent '([^']{1,64})'\]\s*)([\s\S]*)$/u
+
+function extractAssistantReply(messages, afterUserText) {
+  const rows = Array.isArray(messages) ? messages : []
+  let start = 0
+  if (afterUserText) {
+    const needle = String(afterUserText)
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i]?.role === "user" && transcriptText(rows[i]).includes(needle)) {
+        start = i + 1
+        break
+      }
+    }
+  }
+  for (let i = rows.length - 1; i >= start; i--) {
+    if (rows[i]?.role !== "assistant") {
+      continue
+    }
+    let text = transcriptText(rows[i]).trim()
+    if (!text) {
+      continue
+    }
+    const match = TEAMMATE_NOTICE_RE.exec(text)
+    if (match) {
+      text = (match[4] || text).trim()
+    }
+    if (text && !isWorkingTeaser(text)) {
+      return text
+    }
+  }
+  return ""
+}
+
+function delay(ms) {
+  return new Promise(resolve => {
+    const timer = typeof window !== "undefined" && window.setTimeout ? window.setTimeout : setTimeout
+    timer(resolve, ms)
+  })
+}
+
+function isWorkingTeaser(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return true
+  const head = raw.split('\n').slice(0, 3).join(' ').slice(0, 240).toLowerCase()
+  if (/^thought\b/.test(head)) return true
+  if (/\blet me\b/.test(head)) return true
+  if (/\bfresh (search|look|check|sear)\b/.test(head)) return true
+  if (/\balready (looked|checked|searched)\b/.test(head)) return true
+  if (/\bstill (looking|searching|working|checking)\b/.test(head)) return true
+  if (/\bdid(?:n't| not) (find|surface|get)\b/.test(head)) return true
+  if (/\bi(?:'ll| will) (search|look|check|try)\b/.test(head)) return true
+  if (head.length < 80 && /\b(searching|looking|checking|working on it)\b/.test(head)) return true
+  if (/\.{3}$/.test(raw) && raw.length < 400) return true
+  return false
+}
+
+function onOriginChat(sessionId, profile) {
+  const activeProfile = String(host.state.profile.get() || $selectedBot.get() || '').toLowerCase()
+  const activeSession = host.activeSessionId?.get?.() || null
+  const wantProfile = String(profile || '').toLowerCase()
+  if (wantProfile && activeProfile && wantProfile !== activeProfile) return false
+  if (sessionId && activeSession && String(sessionId) !== String(activeSession)) return false
+  return true
+}
+
+function rememberPrint(sessionId, profile, role, text, visible) {
+  const content = String(text || '').trim()
+  if (!content) return null
+  const row = {
+    id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    sessionId: sessionId || null,
+    profile: String(profile || '').toLowerCase(),
+    role: role === 'user' ? 'user' : 'assistant',
+    text: content
+  }
+  const already = ($originPrints.get() || []).some(prev => prev.profile === row.profile && prev.role === row.role && prev.text === row.text)
+  if (already) return null
+  $originPrints.set([...($originPrints.get() || []), row].slice(-40))
+  if (visible) onScreenPrints.add(row.id)
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('origin-prints', $originPrints.get())).catch(() => undefined)
+  } catch {
+  }
+  return row
+}
+
+function replayOriginPrints() {
+  const profile = String(host.state.profile.get() || $selectedBot.get() || '').toLowerCase()
+  const sessionId = host.activeSessionId?.get?.() || null
+  if (!profile || typeof host.appendMessage !== 'function') return
+  for (const row of ($originPrints.get() || [])) {
+    if (row.profile && row.profile !== profile) continue
+    if (onScreenPrints.has(row.id)) continue
+    try {
+      const ok = host.appendMessage({
+        role: row.role,
+        text: row.text,
+        sessionId: row.sessionId || sessionId
+      })
+      if (ok) onScreenPrints.add(row.id)
+    } catch {
+    }
+  }
+}
+
+function teaserPlain(text) {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/_([^_]+)_/g, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function clearStuckComposer() {
+  const wipe = () => {
+    if (typeof document === 'undefined') return
+    const roots = document.querySelectorAll('[data-slot="composer-surface"]')
+    for (const root of roots) {
+      const editors = root.querySelectorAll('[contenteditable="true"]')
+      for (const el of editors) {
+        if (el.textContent) {
+          el.textContent = ''
+          el.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+      }
+    }
+  }
+  wipe()
+  setTimeout(wipe, 0)
+  setTimeout(wipe, 40)
+  setTimeout(wipe, 120)
+}
+
+async function injectOriginLine(sessionId, profile, role, text) {
+  const content = String(text || '').trim()
+  if (!content) {
+    return false
+  }
+  const visible = onOriginChat(sessionId, profile)
+  rememberPrint(sessionId, profile, role, content, visible)
+  let persisted = false
+  if (sessionId) {
+    const payload = {
+      session_id: sessionId,
+      profile,
+      role,
+      content,
+      observed: true
+    }
+    try {
+      await host.request('session.append_message', payload)
+      persisted = true
+    } catch {
+    }
+  }
+  if (visible) {
+    try {
+      if (typeof host.appendMessage === 'function') {
+        host.appendMessage({ role, text: content, sessionId })
+      }
+    } catch {
+    }
+  }
+  if (persisted || visible) return true
+  if (!sessionId) {
+    return false
+  }
+  const payload = {
+    session_id: sessionId,
+    profile,
+    role,
+    content,
+    observed: true
+  }
+  try {
+    await host.request('session.append', payload)
+    return true
+  } catch {
+  }
+  try {
+    await host.request('session.append_message', payload)
+    return true
+  } catch {
+  }
+  try {
+    await host.request('messages.append', payload)
+    return true
+  } catch {
+  }
+  return false
+}
+
+function applyHandoffPreview(botName, preview) {
+  const text = String(preview || "").trim()
+  if (!text || /^Message from/i.test(text) || isWorkingTeaser(text)) {
+    return
+  }
+  const prev = $handoffs.get() || []
+  const completed = []
+  const next = prev.map(row => {
+    if (row.target === botName && row.status === "sent") {
+      const done = { ...row, status: "done", answer: text }
+      completed.push(done)
+      return done
+    }
+    return row
+  })
+  for (const row of completed) {
+    void injectOriginLine(row.originSession, row.origin, 'assistant', botHandle(row.target) + ': ' + text)
+  }
+  // Keep the thinking strip until the origin chat is on screen and printed.
+  const keep = next.filter(row => {
+    if (row.status !== 'done') return true
+    return !onOriginChat(row.originSession, row.origin)
+  })
+  $handoffs.set(keep)
+  const busy = { ...$botBusy.get() }
+  delete busy[botName]
+  $botBusy.set(busy)
+}
+const ORCHESTRATORS = ['staff', 'default', 'hermes']
+
+const ROUTE_BUCKETS = {
+  research: [
+    'look up', 'lookup', 'paper', 'search', 'source', 'cite', 'latest',
+    'what model', 'google', 'wiki', 'arxiv', 'according to', 'find me',
+    'documentation', 'docs', 'news', 'who wrote', 'reference'
+  ]
+}
+
+function isOrchestrator(name) {
+  return ORCHESTRATORS.includes(String(name || '').toLowerCase())
+}
+
+function classifyGroupAsk(text, roster, active) {
+  const hay = String(text || '').toLowerCase()
+  if (!/\b(?:ask (?:the )?(?:group|team|everyone|others)|tell (?:the )?(?:group|team|everyone)|check(?: in)? with (?:the )?(?:group|team|everyone)|how are (?:you )?(?:both|all)|how is everyone)\b/.test(hay)) {
+    return []
+  }
+  const self = String(active || '').toLowerCase()
+  return (Array.isArray(roster) ? roster : [])
+    .map(bot => String(bot.name || '').toLowerCase())
+    .filter(name => name && name !== self)
+}
+
+function parseBareLeadMention(text, names, active) {
+  const match = String(text || '').match(/^([a-z0-9][a-z0-9_-]{1,63})(?:\s+|:\s*)/i)
+  if (!match) return []
+  let name = match[1].toLowerCase()
+  if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
+    name = 'default'
+  }
+  if (names.includes(name) && name !== active) return [name]
+  return []
+}
+
+function classifyRoute(text, roster, active) {
+  const raw = String(text || '')
+  const self = String(active || '').toLowerCase()
+  if (!isOrchestrator(self)) return []
+  const list = Array.isArray(roster) ? roster : []
+  const names = list.map(bot => String(bot.name || '').toLowerCase()).filter(Boolean)
+  if (parseRosterMentions(raw, names, '').length || parseBareLeadMention(raw, names, self).length) {
+    return []
+  }
+  const hay = raw.toLowerCase()
+  const scored = []
+  for (const bot of list) {
+    const name = String(bot.name || '').toLowerCase()
+    if (!name || name === self || isOrchestrator(name)) continue
+    let score = 0
+    const meta = ($botMeta.get() || {})[name] || {}
+    const blob = [bot.name, bot.title, bot.description, meta.title, meta.description].filter(Boolean).join(' ')
+    for (const token of blob.toLowerCase().split(/[^a-z0-9]+/).filter(tok => tok.length > 3)) {
+      if (hay.includes(token)) score += 1
+    }
+    for (const phrase of (ROUTE_BUCKETS[name] || [])) {
+      if (hay.includes(phrase)) score += 2
+    }
+    if (score > 0) scored.push({ name, score })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  if (!scored.length || scored[0].score < 2) return []
+  if (scored.length === 1 || scored[0].score - scored[1].score >= 2) return [scored[0].name]
+  return []
+}
+
+function HandoffStrip() {
+  const profile = useValue(host.state.profile)
+  const handoffs = useValue($handoffs)
+  const meta = useValue($botMeta)
+  const current = String(profile || $selectedBot.get() || 'default').toLowerCase()
+  const rows = (handoffs || []).filter(row => String(row.origin || '').toLowerCase() === current && row.status === 'sent').slice(-3)
+  if (!rows.length) {
+    return null
+  }
+  return jsx('div', {
+    className: 'grid gap-3 px-1 py-2',
+    children: rows.map(row => {
+      const targetMeta = meta[row.target] || {}
+      const look = botAppearance(row.target, targetMeta)
+      const waiting = row.status === 'sent' && !row.answer
+      return jsxs('div', {
+        className: 'grid gap-2',
+        children: [
+          jsx('div', {
+            className: 'flex justify-end',
+            children: jsx('div', {
+              className: 'max-w-[85%] rounded-2xl bg-(--ui-fill-secondary) px-3 py-2 text-[0.92rem] leading-relaxed',
+              children: row.ask
+            })
+          }),
+          jsxs('div', {
+            className: 'flex items-start gap-2',
+            children: [
+              jsx('div', {
+                className: 'mt-0.5 shrink-0',
+                children: jsx(BotFace, {
+                  shape: look.shape,
+                  color: look.color,
+                  image: look.image,
+                  size: 28,
+                  name: row.target,
+                  mood: waiting ? 'work' : 'idle'
+                })
+              }),
+              jsx('div', {
+                className: 'min-w-0 max-w-[85%] rounded-2xl px-1 py-1 text-[0.92rem] leading-relaxed',
+                children: waiting
+                  ? jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'thinking\u2026' })
+                  : teaserPlain(row.answer || '')
+              })
+            ]
+          })
+        ]
+      }, row.id)
+    })
+  })
+}
+
+async function targetStillRunning(sessionId, profile) {
+  try {
+    const st = await host.request('session.status', {
+      session_id: sessionId,
+      profile
+    })
+    const out = String(st?.output || '')
+    if (/Agent Running:\s*Yes/i.test(out)) return true
+    if (/Agent Running:\s*No/i.test(out)) return false
+  } catch {
+  }
+  return null
+}
+
+async function watchHandoff(row) {
+  if (!row || !row.runtime) {
+    return
+  }
+  let last = ''
+  let stable = 0
+  for (let i = 0; i < 180; i++) {
+    await delay(2000)
+    try {
+      const running = await targetStillRunning(row.runtime, row.target)
+      const hist = await host.request('session.history', {
+        session_id: row.runtime,
+        profile: row.target
+      })
+      const messages = (hist && (hist.messages || hist.history || hist.items)) || []
+      let answer = extractAssistantReply(messages, row.payload || row.ask)
+      if (running === false) {
+        answer = extractAssistantReply(messages, row.payload || row.ask) || last
+        // Idle: last assistant line is the answer, even if it looks mid-thought.
+        if (!answer) {
+          const rows = Array.isArray(messages) ? messages : []
+          for (let i = rows.length - 1; i >= 0; i--) {
+            if (rows[i]?.role === 'assistant') {
+              const text = transcriptText(rows[i]).trim()
+              if (text) { answer = text; break }
+            }
+          }
+        }
+      }
+      if (running === true) {
+        if (answer) last = answer
+        stable = 0
+        continue
+      }
+      if (!answer) continue
+      if (answer !== last) {
+        last = answer
+        stable = 0
+        continue
+      }
+      stable += 1
+      if (running === false && stable >= 2) {
+        applyHandoffPreview(row.target, answer)
+        return
+      }
+      if (running == null && stable >= 5 && !isWorkingTeaser(answer) && answer.length > 240) {
+        applyHandoffPreview(row.target, answer)
+        return
+      }
+    } catch {
+    }
+  }
+  if (last) {
+    applyHandoffPreview(row.target, last)
+  }
+}
+
 function BotRow({ bot, onDelete, onEdit }) {
   const activeProfile = useValue(host.state.profile)
   const meta = useValue($botMeta)[bot.name]
@@ -2205,10 +2665,11 @@ function BotRow({ bot, onDelete, onEdit }) {
   const photo = Boolean(image && !isBackfilledFacePng(image))
   const gatewayState = useValue(host.state.gateway)
   const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
-  // Work pose only when this bot is actually doing something: the active
-  // profile while the gateway is busy, or a bot that wrote within the
-  // liveness window. Not every bot whenever the gateway is busy.
-  const botMood = (isActive && gatewayState === 'busy') || activeNow ? 'work' : 'idle'
+  const handoffBusy = Boolean(useValue($botBusy)[bot.name])
+  // Work pose only when this bot is actually doing something: a plugin
+  // handoff, the active profile while the gateway is busy, or a bot that
+  // wrote within the liveness window. Not every bot whenever the gateway is busy.
+  const botMood = handoffBusy || (isActive && gatewayState === 'busy') || activeNow ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
   // Human-readable session context: WHICH chat the preview belongs to, WHO
   // sent the last message (bot-to-bot DM vs human), and whether the bot is
@@ -5005,6 +5466,15 @@ export default {
           }
         })
         .catch(() => undefined)
+      Promise.resolve(ctx.storage?.get?.('origin-prints'))
+        .then(value => {
+          if (Array.isArray(value) && value.length) {
+            $originPrints.set(value.slice(-40))
+            onScreenPrints.clear()
+            setTimeout(replayOriginPrints, 80)
+          }
+        })
+        .catch(() => undefined)
     } catch {
       /* no storage on this shell — defaults stay */
     }
@@ -5027,6 +5497,9 @@ export default {
       if (profile && typeof profile === 'string') {
         $selectedBot.set(profile)
       }
+      onScreenPrints.clear()
+      setTimeout(replayOriginPrints, 80)
+      setTimeout(replayOriginPrints, 400)
     })
 
     ctx.register({
@@ -5065,10 +5538,65 @@ export default {
       }
     })
 
-    // @-mention middleware: "@<bot> do the thing" in any chat becomes an
-    // explicit handoff instruction the active agent's SOUL.md knows how to
-    // execute. Names are validated against the LIVE roster so
-    // "user@example.com" or an unknown @ passes through untouched.
+    async function deliverToBot(senderId, senderLabel, toName, userText) {
+      const payload = formatTeammateNotice(senderLabel, senderId, userText)
+      $botBusy.set({ ...$botBusy.get(), [toName]: true })
+      if ($selectedBot.get() !== toName) {
+        $botUnread.set({ ...$botUnread.get(), [toName]: true })
+      }
+      try {
+        const meta = $botMeta.get()[toName] || {}
+        const pinned = meta.chat || meta.chat_pin || null
+        let runtime = null
+
+        if (pinned) {
+          try {
+            const resumed = await host.request('session.resume', {
+              session_id: pinned,
+              profile: toName
+            })
+            runtime = resumed?.session_id || null
+          } catch {
+            runtime = null
+          }
+        }
+
+        if (!runtime) {
+          const created = await host.request('session.create', {
+            profile: toName,
+            title: 'Bot Chat'
+          })
+          runtime = created?.session_id || null
+          if (created?.stored_session_id) {
+            saveBotMeta(toName, { chat: created.stored_session_id })
+          }
+        }
+
+        if (runtime) {
+          await host.request('prompt.submit', { session_id: runtime, text: payload })
+          return { runtime, payload }
+        }
+
+        await host.request('cli.exec', {
+          argv: ['-p', toName, 'chat', '--in', '~', '-c', 'Bot Chat', '-Q', '-q', payload]
+        })
+        return { runtime: null, payload }
+      } catch {
+        await host.request('cli.exec', {
+          argv: ['-p', toName, 'chat', '--in', '~', '-c', 'Bot Chat', '-Q', '-q', payload]
+        })
+        return { runtime: null, payload }
+      }
+    }
+
+    ctx.register({
+      id: 'handoff-strip',
+      area: COMPOSER_AREAS.top,
+      render: () => jsx(HandoffStrip, {})
+    })
+
+    // Mention / silent-route middleware: the PLUGIN delivers to 1–2 roster bots.
+    // Unknown @ and email-like @ pass through. 3+ mentions refuse.
     ctx.register({
       id: 'mention-middleware',
       area: COMPOSER_AREAS.middleware,
@@ -5087,8 +5615,8 @@ export default {
           if (slashNew) {
             const activeBot = $selectedBot.get()
             const meta = activeBot ? $botMeta.get()[activeBot] : null
-            const pinnedId = meta?.chat || null
-            const currentId = host.activeSessionId?.get?.() ?? null
+            const pinnedId = meta?.chat || meta?.chat_pin || null
+            const currentId = host.activeSessionId?.get?.() ?? host.state.activeSessionId?.get?.() ?? null
 
             if (activeBot && pinnedId && currentId && String(currentId) === String(pinnedId)) {
               host.notify({
@@ -5103,55 +5631,89 @@ export default {
             }
           }
 
-          if (!/(^|\s)@[a-z0-9][a-z0-9_-]*/i.test(text)) {
-            return draft
-          }
-
           let names = []
           try {
             const res = await host.request('profiles.list', { include_sessions: false })
-            names = (res?.profiles ?? []).map(p => p.name)
+            names = (res?.profiles ?? []).map(p => String(p.name || '').toLowerCase()).filter(Boolean)
           } catch {
+            names = []
+          }
+          if (!names.length) {
+            names = ($lastRoster.get() || []).map(p => String(p.name || '').toLowerCase()).filter(Boolean)
+          }
+
+          const active = (host.state.profile.get() || $selectedBot.get() || 'default').toLowerCase()
+          const mentioned = parseRosterMentions(text, names, active)
+          const led = mentioned.length ? [] : parseBareLeadMention(text, names, active)
+          const explicit = mentioned.length ? mentioned : led
+
+          if (explicit.length >= 3) {
+            host.notify({
+              kind: 'info',
+              title: 'Too many @mentions',
+              message: 'Split the ask — fan-out of three or more needs an explicit confirm. Nothing was sent.'
+            })
+            clearStuckComposer()
+            return null
+          }
+
+          const targets = explicit.length
+            ? explicit
+            : (classifyGroupAsk(text, $lastRoster.get() || [], active).length
+              ? classifyGroupAsk(text, $lastRoster.get() || [], active)
+              : classifyRoute(text, $lastRoster.get() || [], active))
+          if (!targets.length) {
             return draft
           }
 
-          // Mentions in code are code, not handoffs (#20).
-          const prose = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
-          const active = (host.state.profile.get() || 'default').trim() || 'default'
-          const mentioned = []
-
-          for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
-            let name = match[2].toLowerCase()
-
-            if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
-              name = 'default'
-            }
-
-            if (names.includes(name) && name !== active && !mentioned.includes(name)) {
-              mentioned.push(name)
-            }
-          }
-
-          if (!mentioned.length) {
-            return draft
-          }
-
-          // The ACTIVE BOT composes the message — it understands intent; a
-          // text pipe never can. Delivery is the one blessed command into the
-          // recipient's canonical Bot Chat, so their side reads as a normal
-          // DM (message bubble + their reply), and the reply prints on
-          // stdout for the sender to relay.
           const activeMeta = $botMeta.get()[active]
           const senderName = displayName({ name: active, title: activeMeta?.title }, activeMeta)
-          const note =
-            '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
-            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
-            mentioned.map(n => '`hermes -p ' + n + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + senderName + ' (@' + botHandle(active) + '): <your composed message>"`').join('\n') +
-            '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
-            'Relay the reply back to the user, attributed to that agent.]'
+          const handles = targets.map(botHandle).join(', ')
 
-          return { ...draft, text: text + note }
-        }      }
+          const results = await Promise.allSettled(
+            targets.map(to => deliverToBot(active, senderName, to, text))
+          )
+
+          results.forEach((result, i) => {
+            if (result.status !== 'fulfilled') {
+              return
+            }
+            const delivered = result.value || {}
+            const to = targets[i]
+            const originSession = host.activeSessionId?.get?.() || host.state.activeSessionId?.get?.() || null
+            const row = {
+              id: Date.now() + '-' + to,
+              origin: active,
+              originSession,
+              target: to,
+              ask: text,
+              payload: delivered.payload,
+              runtime: delivered.runtime,
+              status: 'sent',
+              answer: ''
+            }
+            $handoffs.set([...($handoffs.get() || []), row])
+            if (i === 0) {
+              void injectOriginLine(originSession, active, 'user', text)
+            }
+            void watchHandoff(row)
+          })
+
+          const failed = results.filter(r => r.status === 'rejected')
+          if (failed.length) {
+            const first = failed[0].reason
+            const detail = first && first.message ? first.message : String(first || 'unknown error')
+            host.notify({
+              kind: 'error',
+              title: 'Could not tell ' + (failed.length === results.length ? handles : 'every bot'),
+              message: detail
+            })
+          }
+
+          clearStuckComposer()
+          return null
+        }
+      }
     })
   }
 }
