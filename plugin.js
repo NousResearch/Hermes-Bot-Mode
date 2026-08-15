@@ -4132,6 +4132,13 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`
 }
 
+/** Escape for interpolation INSIDE an existing double-quoted shell string:
+ *  keeps ", `, $, and \ literal so free-text titles (which sync from ui_meta)
+ *  and gateway profile names can't expand or break out of the quotes. */
+function shellDoubleQuote(value) {
+  return String(value).replace(/[\\"`$]/g, ch => '\\' + ch)
+}
+
 function routineInputError(title, instruction) {
   if (String(title).includes('\0')) {
     return 'Cronjob name cannot contain NUL (U+0000).'
@@ -5143,10 +5150,14 @@ export default {
           // stdout for the sender to relay.
           const activeMeta = $botMeta.get()[active]
           const senderName = displayName({ name: active, title: activeMeta?.title }, activeMeta)
+          // The command below runs verbatim in the active agent's terminal:
+          // sender titles are free text (and sync from ui_meta), and profile
+          // names come from the gateway — every interpolated value must stay
+          // shell-literal, same class as the routine-prompt fix (#21).
           const note =
             '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
-            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
-            mentioned.map(n => '`hermes -p ' + n + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + senderName + ' (@' + botHandle(active) + '): <your composed message>"`').join('\n') +
+            'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim (avoid double quotes in your composed message). Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
+            mentioned.map(n => '`hermes -p ' + shellQuote(n) + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + shellDoubleQuote(senderName) + ' (@' + shellDoubleQuote(botHandle(active)) + '): <your composed message>"`').join('\n') +
             '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
             'Relay the reply back to the user, attributed to that agent.]'
 
