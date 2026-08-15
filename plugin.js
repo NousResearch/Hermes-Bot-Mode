@@ -39,6 +39,7 @@ import {
   haptic,
   host,
   Input,
+  McpTab,
   PALETTE_AREA,
   profileColor,
   queryClient,
@@ -53,6 +54,7 @@ import {
   Switch,
   Textarea,
   Tip,
+  ToolsetConfigPanel,
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
@@ -279,6 +281,26 @@ function rasterizeSvgToPng(svgEl, size) {
   })
 }
 
+/** The roster backfill draws the live SVG at 160x160. Pets are 96x104
+ *  and uploads are 256. Use that to tell a still face-copy from a real picture. */
+function isBackfilledFacePng(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+    return false
+  }
+
+  try {
+    const bin = atob(dataUrl.slice('data:image/png;base64,'.length).slice(0, 48))
+    if (bin.length < 24) {
+      return false
+    }
+    const w = (bin.charCodeAt(16) << 24) | (bin.charCodeAt(17) << 16) | (bin.charCodeAt(18) << 8) | bin.charCodeAt(19)
+    const h = (bin.charCodeAt(20) << 24) | (bin.charCodeAt(21) << 16) | (bin.charCodeAt(22) << 8) | bin.charCodeAt(23)
+    return w === 160 && h === 160
+  } catch {
+    return false
+  }
+}
+
 function pullServerAvatars(roster) {
   pushLocalAvatars(roster)
 
@@ -297,7 +319,13 @@ function pullServerAvatars(roster) {
       .then(res => {
         if (res?.found && res.data) {
           const current = $botMeta.get()
-          $botMeta.set({ ...current, [bot.name]: { ...(current[bot.name] || {}), image: res.data } })
+          const mine = current[bot.name] || {}
+          // A 160px raster of the vector face is only for inter-agent
+          // notices. Do not park it on the roster or the live face dies.
+          if (isBackfilledFacePng(res.data) && mine.imageKind !== 'photo' && !mine.pet) {
+            return
+          }
+          $botMeta.set({ ...current, [bot.name]: { ...mine, image: res.data } })
 
           try {
             Promise.resolve(pluginCtx?.storage?.set?.('bot-meta', $botMeta.get())).catch(() => undefined)
@@ -445,6 +473,7 @@ if (typeof document !== 'undefined' && !document.getElementById('hermes-bots-ros
 }
 
 const AVATAR_SHAPES = ['circle', 'squircle', 'pill', 'triangle', 'hexagon', 'cloud', 'drop']
+const AVATAR_PICKER_SHAPES = ['circle', 'blob', 'squircle', 'pill', 'triangle', 'hexagon', 'cloud', 'drop']
 
 /** xorshift PRNG seeded from a string — stable across sessions/platforms. */
 function sigilRng(text) {
@@ -651,52 +680,324 @@ const EYE_X = {
   icosahedron: [16.5, 23.5]
 }
 
+function cubicAt(p0, p1, p2, p3, t) {
+  const u = 1 - t
+  return [
+    u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0],
+    u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1]
+  ]
+}
+
+/** Same outline as the old GitHub drop path, so it stays a fat water drop. */
+function sampleDropRing(steps) {
+  const pts = []
+  const n = Math.max(8, Math.floor(steps / 3))
+
+  for (let i = 0; i < n; i++) {
+    pts.push(cubicAt([20, 3], [20, 3], [6, 20], [6, 27], i / n))
+  }
+
+  for (let i = 0; i <= n; i++) {
+    const t = (i / n) * Math.PI
+    pts.push([20 - 14 * Math.cos(t), 27 + 13.5 * Math.sin(t)])
+  }
+
+  for (let i = 1; i <= n; i++) {
+    pts.push(cubicAt([34, 27], [34, 20], [20, 3], [20, 3], i / n))
+  }
+
+  return pts
+}
+
+function svgArc(x1, y1, rx, ry, fa, fs, x2, y2) {
+  const dx = (x1 - x2) / 2
+  const dy = (y1 - y2) / 2
+  let rx2 = rx * rx
+  let ry2 = ry * ry
+  const lam = (dx * dx) / rx2 + (dy * dy) / ry2
+  if (lam > 1) {
+    const s = Math.sqrt(lam)
+    rx *= s
+    ry *= s
+    rx2 = rx * rx
+    ry2 = ry * ry
+  }
+  const num = rx2 * ry2 - rx2 * dy * dy - ry2 * dx * dx
+  const den = rx2 * dy * dy + ry2 * dx * dx
+  let sq = Math.sqrt(Math.max(0, num / den))
+  if (fa === fs) {
+    sq = -sq
+  }
+  const cx = sq * (rx * dy / ry) + (x1 + x2) / 2
+  const cy = sq * (-ry * dx / rx) + (y1 + y2) / 2
+  const ang = (ux, uy, vx, vy) => {
+    const n = Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1
+    let a = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy) / n)))
+    if (ux * vy - uy * vx < 0) {
+      a = -a
+    }
+    return a
+  }
+  const theta1 = ang(1, 0, (x1 - cx) / rx, (y1 - cy) / ry)
+  let dtheta = ang((x1 - cx) / rx, (y1 - cy) / ry, (x2 - cx) / rx, (y2 - cy) / ry)
+  if (!fs && dtheta > 0) {
+    dtheta -= Math.PI * 2
+  }
+  if (fs && dtheta < 0) {
+    dtheta += Math.PI * 2
+  }
+  return { cx, cy, rx, ry, theta1, dtheta }
+}
+
+function sampleArc(arc, n) {
+  const pts = []
+  for (let i = 0; i < n; i++) {
+    const th = arc.theta1 + arc.dtheta * (i / n)
+    pts.push([arc.cx + arc.rx * Math.cos(th), arc.cy + arc.ry * Math.sin(th)])
+  }
+  return pts
+}
+
+/** Same outline as the old GitHub cloud path: three puffs and a flat floor. */
+function sampleCloudRing(steps) {
+  const a1 = svgArc(11, 32, 7.5, 7.5, 0, 1, 10, 17.1)
+  const a2 = svgArc(10, 17.1, 9.5, 9.5, 0, 1, 29, 12.5)
+  const a3 = svgArc(29, 12.5, 7, 7, 0, 1, 30, 32)
+  const len1 = Math.abs(a1.dtheta) * a1.rx
+  const len2 = Math.abs(a2.dtheta) * a2.rx
+  const len3 = Math.abs(a3.dtheta) * a3.rx
+  const len4 = 19
+  const total = len1 + len2 + len3 + len4
+  const n = Math.max(64, steps)
+  const n1 = Math.max(8, Math.round(n * len1 / total))
+  const n2 = Math.max(10, Math.round(n * len2 / total))
+  const n3 = Math.max(10, Math.round(n * len3 / total))
+  const n4 = Math.max(4, n - n1 - n2 - n3)
+  const pts = []
+  pts.push(...sampleArc(a1, n1))
+  pts.push(...sampleArc(a2, n2))
+  pts.push(...sampleArc(a3, n3))
+  for (let i = 0; i < n4; i++) {
+    pts.push([30 + (11 - 30) * (i / n4), 32])
+  }
+  return pts
+}
+
+/** Outline of a face in a 40x40 box. Same family as Grok Bot
+ *  (blob / squircle / pebble / \u2026) but sampled from formulas, not
+ *  a dumped point cloud. */
+function sampleFaceRing(shape, steps = 52) {
+  const kind = (shape || '').startsWith('sigil-') ? 'circle' : shape
+
+  if (kind === 'drop' || kind === 'teardrop') {
+    return sampleDropRing(steps)
+  }
+  if (kind === 'cloud') {
+    return sampleCloudRing(steps)
+  }
+  const pts = []
+
+  for (let i = 0; i < steps; i++) {
+    const a = (i / steps) * Math.PI * 2 - Math.PI / 2
+    const c = Math.cos(a)
+    const s = Math.sin(a)
+    let rx = 16
+    let ry = 16
+    if (kind === 'circle') {
+      rx = ry = 16.2
+    } else if (kind === 'blob') {
+      rx = ry = 16 + 1.7 * Math.sin(3 * a) + 0.7 * Math.cos(5 * a)
+    } else if (kind === 'squircle') {
+      const p = 5
+      const d = Math.pow(Math.abs(c) ** p + Math.abs(s) ** p, 1 / p) || 1
+      rx = ry = 16.2 / d
+    } else if (kind === 'pill') {
+      const d = Math.pow(Math.abs(c) ** 8 + Math.abs(s / 0.72) ** 8, 1 / 8) || 1
+      rx = ry = 16 / d
+    } else if (kind === 'triangle' || kind === 'tetrahedron' || kind === 'wedge') {
+      const u = (a + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2)
+      const sector = (u / (Math.PI * 2 / 3)) % 1
+      rx = ry = 13.5 / Math.max(0.42, Math.cos((sector - 0.5) * 1.9))
+    } else if (kind === 'hexagon' || kind === 'hex' || kind === 'icosahedron' || kind === 'dodecahedron') {
+      const seg = Math.PI / 3
+      const hex = Math.cos(seg / 2) / Math.cos(a - seg * Math.round(a / seg))
+      rx = ry = 16.2 * hex
+    } else if (kind === 'cube' || kind === 'octahedron') {
+      const p = 3.1
+      const d = Math.pow(Math.abs(c) ** p + Math.abs(s) ** p, 1 / p) || 1
+      rx = ry = 16 / d
+    } else if (kind === 'pebble') {
+      rx = 16.4 * (1.04 - 0.14 * Math.cos(2 * a))
+      ry = 15.2 * (1.06 + 0.08 * Math.sin(2 * a))
+    } else {
+      rx = ry = 16.2
+    }
+
+    pts.push([20 + rx * c, 20 + ry * s])
+  }
+
+  return pts
+}
+
+function projectFacePoint(x, y, turn, tilt, roll) {
+  const dx = x - 20
+  const dy = y - 20
+  const r = (roll * Math.PI) / 180
+  const xr = dx * Math.cos(r) - dy * Math.sin(r)
+  const yr = dx * Math.sin(r) + dy * Math.cos(r)
+  const sx = 0.74 + 0.26 * Math.abs(Math.cos((turn * Math.PI) / 180))
+  const sy = 0.8 + 0.2 * Math.abs(Math.cos((tilt * Math.PI) / 180))
+  return [20 + xr * sx, 20 + yr * sy]
+}
+
+function ringToPath(pts) {
+  if (!pts.length) {
+    return ''
+  }
+
+  let d = `M${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`
+
+  for (let i = 1; i < pts.length; i++) {
+    d += `L${pts[i][0].toFixed(2)} ${pts[i][1].toFixed(2)}`
+  }
+
+  return d + 'Z'
+}
+
+/** Grok-style pose. thinking/working lean and sway. idle is a small sine. */
+function facePose(mood, t) {
+  if (mood === 'work') {
+    return {
+      turn: -11 + Math.sin(t * 0.48) * 8,
+      tilt: Math.sin(t * 0.42) * 8 + Math.sin(t * 1.1) * 1.6,
+      roll: Math.sin(t * 0.75) * 4.2,
+      gazeX: Math.sin(t * 0.55) * 3.6,
+      gazeY: -1.6 + Math.sin(t * 0.38) * 2,
+      blink: t % 1.45 > 1.26,
+      d0: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6)),
+      d1: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 0.7)),
+      d2: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 1.4))
+    }
+  }
+
+  return {
+    turn: Math.sin(t * 0.5) * 1.5,
+    tilt: Math.sin(t * 0.27),
+    roll: Math.sin(t * 0.85) * 1.2,
+    gazeX: 0,
+    gazeY: 0,
+    blink: t % 3.2 > 3.02,
+    d0: 0,
+    d1: 0,
+    d2: 0
+  }
+}
+
+function paintMathFace(svg, t) {
+  const mood = svg.getAttribute('data-hb-mood') || 'idle'
+  const shape = svg.getAttribute('data-hb-shape') || 'circle'
+  const pose = facePose(mood, t)
+  const body = svg.querySelector('[data-hb-body]')
+  const open = svg.querySelector('[data-hb-open]')
+  const shut = svg.querySelector('[data-hb-shut]')
+  const el = svg.querySelector('[data-hb-el]')
+  const er = svg.querySelector('[data-hb-er]')
+  const dots = svg.querySelectorAll('[data-hb-dot]')
+
+  if (body) {
+    if (shape === 'cloud') {
+      body.setAttribute('d', 'M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z')
+    } else {
+      const ring = sampleFaceRing(shape).map(([x, y]) => projectFacePoint(x, y, pose.turn, pose.tilt, pose.roll))
+      body.setAttribute('d', ringToPath(ring))
+    }
+  }
+
+  const eyeY = (shape === 'cloud' ? 22 : 17.2) + pose.gazeY
+  const eyeL = 15.4 + pose.gazeX
+  const eyeR = 24.6 + pose.gazeX
+
+  if (el) {
+    el.setAttribute('cx', eyeL)
+    el.setAttribute('cy', eyeY)
+  }
+
+  if (er) {
+    er.setAttribute('cx', eyeR)
+    er.setAttribute('cy', eyeY)
+  }
+
+  if (open) {
+    open.setAttribute('opacity', pose.blink ? '0' : '1')
+  }
+
+  if (shut) {
+    shut.setAttribute('d', `M${eyeL - 2.6} ${eyeY} L${eyeL + 2.6} ${eyeY} M${eyeR - 2.6} ${eyeY} L${eyeR + 2.6} ${eyeY}`)
+    shut.setAttribute('opacity', pose.blink ? '1' : '0')
+  }
+
+  dots.forEach((dot, i) => {
+    const o = i === 0 ? pose.d0 : i === 1 ? pose.d1 : pose.d2
+    dot.setAttribute('opacity', String(o))
+  })
+
+  svg.style.transform = `rotate(${pose.tilt}deg)`
+  svg.style.transformOrigin = '50% 70%'
+}
+
+function walkMathFaces(root, acc) {
+  if (!root || !root.querySelectorAll) {
+    return acc
+  }
+
+  root.querySelectorAll('svg[data-hb-math]').forEach(node => acc.push(node))
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) {
+      walkMathFaces(el.shadowRoot, acc)
+    }
+  })
+  return acc
+}
+
+function startFaceClock() {
+  if (typeof window === 'undefined' || window.__hbFaceClock) {
+    return
+  }
+
+  window.__hbFaceClock = true
+  const t0 = performance.now()
+  // The shadow-root walk over the whole document is the expensive part —
+  // do it at ~1Hz and paint the cached list per frame. Skip paints while
+  // the window is hidden; rAF is throttled there anyway, but be explicit.
+  let faces = []
+  let lastScan = -Infinity
+
+  const tick = now => {
+    if (!document.hidden) {
+      if (now - lastScan > 1000) {
+        faces = walkMathFaces(document, [])
+        lastScan = now
+      }
+      const t = (now - t0) / 1000
+      for (const svg of faces) {
+        if (svg.isConnected) {
+          paintMathFace(svg, t)
+        }
+      }
+    }
+    window.requestAnimationFrame(tick)
+  }
+
+  window.requestAnimationFrame(tick)
+}
+
 /**
- * The face. `mood`: 'idle' (blinks every few seconds), 'work' (eyes scan
- * left-right), 'error' (X X). Eyes flip light-on-dark for ink/oxblood bodies.
+ * Live math face. Photos still use <img>. Shape avatars stay SVG so
+ * the clock can move them (a baked PNG cannot).
  */
 function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle' }) {
-  // data-bot-face lets the avatar backfill locate this bot's rendered SVG
-  // in the DOM to rasterize it for the server asset store (vector shape
-  // avatars have no image file anywhere otherwise).
-  const [blink, setBlink] = useState(false)
-  const [scanX, setScanX] = useState(0)
+  startFaceClock()
 
-  useEffect(() => {
-    if (mood === 'work') {
-      // scan: pupils sweep left → right → left
-      let dir = 1
-      let x = 0
-      const t = setInterval(() => {
-        x += dir
-        if (x >= 2 || x <= -2) {
-          dir = -dir
-        }
-        setScanX(x)
-      }, 180)
-      return () => clearInterval(t)
-    }
-
-    if (mood === 'idle') {
-      // blink: 120ms closed, randomized 3-7s apart
-      let closeTimer = null
-      const schedule = () => {
-        closeTimer = setTimeout(() => {
-          setBlink(true)
-          setTimeout(() => {
-            setBlink(false)
-            schedule()
-          }, 120)
-        }, 3000 + Math.random() * 4000)
-      }
-      schedule()
-      return () => clearTimeout(closeTimer)
-    }
-
-    return undefined
-  }, [mood])
-
-  // A custom image (uploaded or generated) replaces the vector face.
   if (image) {
     return jsx('img', {
       src: image,
@@ -706,45 +1007,77 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
     })
   }
 
-  const isSigil = shape.startsWith('sigil-')
-  const eyeY = isSigil ? 14 : (EYE_Y[shape] ?? 17)
-  const [eyeL, eyeR] = isSigil ? [16, 24] : (EYE_X[shape] ?? [15.5, 24.5])
-  // Sigils are line art (no fill behind the eyes) → eyes in the sigil color.
-  // Filled bodies: dark eyes on light colors, parchment eyes on dark colors.
-  const eyeFill = isSigil ? color : isDarkColor(color) ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)'
+  // Sigils are line art (no filled body) — the math clock rebuilds filled
+  // outlines, which would turn a stored sigil pick into a blank circle.
+  // Keep the legacy static render for them so old picks still draw.
+  if (shape.startsWith('sigil-')) {
+    const eyes = jsxs('g', {
+      children: [
+        jsx('circle', { cx: 16, cy: 14, r: 2.4, fill: color }),
+        jsx('circle', { cx: 24, cy: 14, r: 2.4, fill: color })
+      ]
+    })
+    return jsxs('svg', {
+      'data-bot-face': name,
+      viewBox: '0 0 40 40',
+      width: size,
+      height: size,
+      'aria-hidden': true,
+      children: [shapeNode(shape, color, name), eyes]
+    })
+  }
 
-  const eyes =
-    mood === 'error'
-      ? jsx('path', {
-          d: `M${eyeL - 2} ${eyeY - 2} L${eyeL + 2} ${eyeY + 2} M${eyeL + 2} ${eyeY - 2} L${eyeL - 2} ${eyeY + 2} ` +
-            `M${eyeR - 2} ${eyeY - 2} L${eyeR + 2} ${eyeY + 2} M${eyeR + 2} ${eyeY - 2} L${eyeR - 2} ${eyeY + 2}`,
-          stroke: eyeFill,
-          strokeWidth: 1.6,
-          strokeLinecap: 'round',
-          fill: 'none'
-        })
-      : blink
-        ? jsx('path', {
-            d: `M${eyeL - 2.2} ${eyeY} L${eyeL + 2.2} ${eyeY} M${eyeR - 2.2} ${eyeY} L${eyeR + 2.2} ${eyeY}`,
-            stroke: eyeFill,
-            strokeWidth: 1.8,
-            strokeLinecap: 'round',
-            fill: 'none'
-          })
-        : jsxs('g', {
-            children: [
-              jsx('circle', { cx: eyeL + scanX, cy: eyeY, r: 2.4, fill: eyeFill }),
-              jsx('circle', { cx: eyeR + scanX, cy: eyeY, r: 2.4, fill: eyeFill })
-            ]
-          })
+  const working = mood === 'work'
+  const eyeFill = isDarkColor(color) ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)'
+  const ring = sampleFaceRing(shape)
+  const rest = facePose(working ? 'work' : 'idle', 0)
 
   return jsxs('svg', {
     'data-bot-face': name,
-    viewBox: '0 0 40 40',
+    'data-hb-math': '1',
+    'data-hb-mood': working ? 'work' : 'idle',
+    'data-hb-shape': shape || 'circle',
+    viewBox: '0 0 40 44',
     width: size,
     height: size,
     'aria-hidden': true,
-    children: [shapeNode(shape, color, name), eyes]
+    style: { overflow: 'visible', display: 'block' },
+    children: [
+      jsx('path', {
+        'data-hb-body': '1',
+        d: shape === 'cloud'
+          ? 'M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z'
+          : ringToPath(ring),
+        fill: color
+      }),
+      jsxs('g', {
+        'data-hb-open': '1',
+        children: [
+          jsx('ellipse', { 'data-hb-el': '1', cx: 15.4, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('ellipse', { 'data-hb-er': '1', cx: 24.6, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('circle', { cx: 14.8, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' }),
+          jsx('circle', { cx: 24, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' })
+        ]
+      }),
+      jsx('path', {
+        'data-hb-shut': '1',
+        d: 'M12.8 17.2 L18 17.2 M22 17.2 L27.2 17.2',
+        stroke: eyeFill,
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        fill: 'none',
+        opacity: 0
+      }),
+      working
+        ? jsxs('g', {
+            children: [
+              jsx('circle', { 'data-hb-dot': '1', cx: 16.4, cy: 41.2, r: 1.15, fill: color, opacity: rest.d0 }),
+              jsx('circle', { 'data-hb-dot': '1', cx: 20, cy: 41.2, r: 1.15, fill: color, opacity: rest.d1 }),
+              jsx('circle', { 'data-hb-dot': '1', cx: 23.6, cy: 41.2, r: 1.15, fill: color, opacity: rest.d2 })
+            ]
+          })
+        : null
+    ]
   })
 }
 
@@ -779,13 +1112,38 @@ async function mcpSetupSupported() {
   return _mcpRpcSupported
 }
 
-function McpSetupButton({ profile, entry, onDone }) {
+function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
   // entry: { name, requires:[env keys], auth?, fromCatalog, installed }
+  // profile may be null at first (New Agent: the profile isn't created yet).
+  // ensureProfile() lazily creates it on the first setup action and returns the
+  // slug, so OAuth / API-key setup works DURING creation, not only in Edit.
   const [phase, setPhase] = useState('idle') // idle | keys | oauth | busy | done | error
   const [supported, setSupported] = useState(null)
   const [keyValues, setKeyValues] = useState({})
   const [message, setMessage] = useState('')
   const pollRef = useRef(null)
+  const profileRef = useRef(profile || null)
+
+  useEffect(() => {
+    if (profile) {
+      profileRef.current = profile
+    }
+  }, [profile])
+
+  // Resolve the target profile, creating it on demand for the New Agent flow.
+  const resolveProfile = async () => {
+    if (profileRef.current) {
+      return profileRef.current
+    }
+    if (ensureProfile) {
+      const created = await ensureProfile()
+      if (created) {
+        profileRef.current = created
+      }
+      return created
+    }
+    return null
+  }
 
   useEffect(() => {
     let alive = true
@@ -808,6 +1166,11 @@ function McpSetupButton({ profile, entry, onDone }) {
     // Ensure the server exists in the target profile first (add from catalog).
     setPhase('busy')
     setMessage('')
+    const profile = await resolveProfile()
+    if (!profile) {
+      setPhase('idle')
+      return
+    }
     if (entry.fromCatalog && !entry.installed) {
       const add = await mcpRpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
       if (!add.ok) {
@@ -821,6 +1184,12 @@ function McpSetupButton({ profile, entry, onDone }) {
 
   const submitKeys = async () => {
     setPhase('busy')
+    const profile = profileRef.current
+    if (!profile) {
+      setPhase('error')
+      setMessage('No target profile')
+      return
+    }
     for (const k of requires) {
       const val = (keyValues[k] || '').trim()
       if (!val) {
@@ -848,6 +1217,11 @@ function McpSetupButton({ profile, entry, onDone }) {
   const beginOAuth = async () => {
     setPhase('busy')
     setMessage('')
+    const profile = await resolveProfile()
+    if (!profile) {
+      setPhase('idle')
+      return
+    }
     if (entry.fromCatalog && !entry.installed) {
       const add = await mcpRpc('mcp.servers.add', { profile, name: entry.name, preset: entry.name })
       if (!add.ok) {
@@ -1176,7 +1550,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                   gap: '6px',
                   justifyItems: 'center'
                 },
-                children: AVATAR_SHAPES.map(s =>
+                children: AVATAR_PICKER_SHAPES.map(s =>
                   jsx(
                     'button',
                     {
@@ -1827,18 +2201,20 @@ function BotRow({ bot, onDelete, onEdit }) {
   const last = bot.last_session
   const isActive = bot.name === activeProfile
   const { shape, color, image } = botAppearance(bot.name, meta)
-  // Reactive eyes: scan while this bot's backend is running a turn in the
-  // active window; calm otherwise. gatewayState is app-wide, so scope to the
-  // active profile's row only.
+  // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
+  const photo = Boolean(image && !isBackfilledFacePng(image))
   const gatewayState = useValue(host.state.gateway)
-  const botMood = isActive && gatewayState === 'busy' ? 'work' : 'idle'
+  const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
+  // Work pose only when this bot is actually doing something: the active
+  // profile while the gateway is busy, or a bot that wrote within the
+  // liveness window. Not every bot whenever the gateway is busy.
+  const botMood = (isActive && gatewayState === 'busy') || activeNow ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
   // Human-readable session context: WHICH chat the preview belongs to, WHO
   // sent the last message (bot-to-bot DM vs human), and whether the bot is
   // actively writing right now (last_active within the liveness window).
   const { fromBot } = previewKind(last?.preview)
   const sessionLabel = last ? generatedSessionTitle(last, last?.preview) : null
-  const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [history, setHistory] = useState(null)
   const [historyError, setHistoryError] = useState(false)
@@ -1924,7 +2300,7 @@ function BotRow({ bot, onDelete, onEdit }) {
     children: [
       jsx('div', {
         className: 'shrink-0',
-        children: jsx(BotFace, { shape, color, image, size: 34, name: bot.name, mood: botMood })
+        children: jsx(BotFace, { shape, color, image: photo ? image : null, size: 34, name: bot.name, mood: botMood })
       }),
       jsxs('div', {
         className: 'min-w-0 flex-1',
@@ -2461,68 +2837,109 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         jsx('div', {
           className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
           children: jsx(ScrollArea, {
-            style: { maxHeight: 160 },
-            children: jsx(CheckList, { items: state.toolsets, onToggle: toggleToolset, columns: 2 })
+            style: { maxHeight: 320 },
+            children: jsx('div', {
+              className: 'grid gap-1.5',
+              children: state.toolsets.map(tset =>
+                jsxs(
+                  'div',
+                  {
+                    className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
+                    children: [
+                      jsxs('label', {
+                        className: 'flex items-center gap-2 text-xs font-medium text-(--ui-text-secondary)',
+                        children: [
+                          jsx(Checkbox, {
+                            checked: !!tset.enabled,
+                            onCheckedChange: value => toggleToolset(tset.name, Boolean(value))
+                          }),
+                          jsx('span', { children: tset.name })
+                        ]
+                      }),
+                      // The REAL per-toolset config (env vars / API keys / model
+                      // picker / post-setup), scoped to THIS bot's profile, when
+                      // the desktop build exposes it. Older builds: just the toggle.
+                      ToolsetConfigPanel
+                        ? jsx('div', {
+                            className: 'mt-1.5 border-t border-(--ui-stroke-secondary) pt-1.5',
+                            children: jsx(ToolsetConfigPanel, { toolset: tset.name, profile: bot })
+                          })
+                        : null
+                    ]
+                  },
+                  tset.name
+                )
+              )
+            })
           })
         })
       ),
       labeled(
-        `MCP servers (${enabledMcp}/${mcpList.length} enabled)`,
+        'MCP servers',
         jsx('div', {
-          className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
-          children: mcpList.length === 0
+          className: 'overflow-hidden rounded-md border border-(--ui-stroke-secondary)',
+          // The REAL MCP tab core Settings renders — per-server enable + OAuth
+          // sign-in + API-key setup + live probes — scoped to this bot's profile.
+          // Feature-detected: older desktop builds without the SDK export fall
+          // back to the plugin's own checkbox list + inline setup buttons.
+          children: McpTab && typeof host.getGateway === 'function'
             ? jsx('div', {
-                className: 'px-1 py-2 text-center text-xs text-(--ui-text-tertiary)',
-                children: 'No MCP servers configured or in the catalog.'
+                style: { minHeight: 220, maxHeight: 360 },
+                children: jsx(McpTab, { gateway: host.getGateway(), profile: bot })
               })
-            : jsx(ScrollArea, {
-                style: { maxHeight: 180 },
-                children: jsx('div', {
-                  className: 'grid gap-1',
-                  children: mcpList.map(m => {
-                    const needsSetup = m.fromCatalog && !m.installed && ((m.requires || []).length > 0 || (m.auth || '').toLowerCase() === 'oauth')
-                    return jsxs(
-                      'label',
-                      {
-                        className: 'flex items-start gap-2 text-xs text-(--ui-text-secondary)',
-                        children: [
-                          jsx(Checkbox, {
-                            checked: !!m.enabled,
-                            disabled: needsSetup,
-                            onCheckedChange: value => toggleMcp(m.name, Boolean(value))
-                          }),
-                          jsxs('span', {
-                            className: 'min-w-0',
-                            children: [
-                              jsx('span', { children: m.name }),
-                              m.fromCatalog && !needsSetup
-                                ? jsx('span', {
-                                    className: 'ml-1.5 text-[0.65rem] text-(--ui-text-quaternary)',
-                                    children: m.installed ? 'catalog · installed' : 'catalog'
-                                  })
-                                : null,
-                              needsSetup
-                                ? jsx(McpSetupButton, {
-                                    profile: bot,
-                                    entry: m,
-                                    onDone: () => toggleMcp(m.name, true)
-                                  })
-                                : null,
-                              m.description
-                                ? jsx('div', {
-                                    className: 'truncate text-[0.65rem] leading-4 text-(--ui-text-quaternary)',
-                                    children: m.description
-                                  })
-                                : null
-                            ]
-                          })
-                        ]
-                      },
-                      m.name
-                    )
+            : mcpList.length === 0
+              ? jsx('div', {
+                  className: 'px-1 py-2 text-center text-xs text-(--ui-text-tertiary)',
+                  children: 'No MCP servers configured or in the catalog.'
+                })
+              : jsx(ScrollArea, {
+                  style: { maxHeight: 180 },
+                  children: jsx('div', {
+                    className: 'grid gap-1 p-2',
+                    children: mcpList.map(m => {
+                      const needsSetup = m.fromCatalog && !m.installed && ((m.requires || []).length > 0 || (m.auth || '').toLowerCase() === 'oauth')
+                      return jsxs(
+                        'label',
+                        {
+                          className: 'flex items-start gap-2 text-xs text-(--ui-text-secondary)',
+                          children: [
+                            jsx(Checkbox, {
+                              checked: !!m.enabled,
+                              disabled: needsSetup,
+                              onCheckedChange: value => toggleMcp(m.name, Boolean(value))
+                            }),
+                            jsxs('span', {
+                              className: 'min-w-0',
+                              children: [
+                                jsx('span', { children: m.name }),
+                                m.fromCatalog && !needsSetup
+                                  ? jsx('span', {
+                                      className: 'ml-1.5 text-[0.65rem] text-(--ui-text-quaternary)',
+                                      children: m.installed ? 'catalog · installed' : 'catalog'
+                                    })
+                                  : null,
+                                needsSetup
+                                  ? jsx(McpSetupButton, {
+                                      profile: bot,
+                                      entry: m,
+                                      onDone: () => toggleMcp(m.name, true)
+                                    })
+                                  : null,
+                                m.description
+                                  ? jsx('div', {
+                                      className: 'truncate text-[0.65rem] leading-4 text-(--ui-text-quaternary)',
+                                      children: m.description
+                                    })
+                                  : null
+                              ]
+                            })
+                          ]
+                        },
+                        m.name
+                      )
+                    })
                   })
                 })
-              })
         })
       ),
       labeled(
@@ -2915,7 +3332,14 @@ function EditProfileDialog({ bot, open, onClose }) {
 
     setBusy(true)
     let advancedFailed = false
-    saveBotMeta(bot.name, { shape, color, image, title: title.trim(), custom: true })
+    saveBotMeta(bot.name, {
+      shape,
+      color,
+      image,
+      imageKind: image ? 'photo' : 'shape',
+      title: title.trim(),
+      custom: true
+    })
 
     const desc = description.trim()
     if (desc !== (bot.description || '').trim()) {
@@ -3033,10 +3457,11 @@ function EditProfileDialog({ bot, open, onClose }) {
 
 function CreateAgentDialog({ open, onClose, roster }) {
   const [name, setName] = useState('')
-  // Create mode: the profile doesn't exist yet, so per-profile MCP credential
-  // setup can't target it — the row shows a "save the agent first" hint and
-  // the live setup UI lives in Edit Profile (where bot.name exists).
-  const setupProfile = null
+  // Create mode: the profile is created LAZILY. Capability toggles are staged in
+  // component state; the profile is materialized either on Create (submit) or on
+  // the first MCP credential setup (ensureAgentCreated), whichever comes first —
+  // so OAuth / API-key setup works DURING creation, not only after in Edit.
+  const createdRef = useRef(null)
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [shape, setShape] = useState('circle')
@@ -3082,6 +3507,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
     setCapFilter('')
     setBusy(false)
     setError(null)
+    createdRef.current = null
   }
 
   // Capability catalog for the tabs: the profile doesn't exist yet, so show
@@ -3114,6 +3540,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
               enabled: false,
               fromCatalog: true,
               installed: s.installed,
+              auth: s.auth,
               requires: s.requires || [],
               description: s.description || ''
             }))
@@ -3132,6 +3559,62 @@ function CreateAgentDialog({ open, onClose, roster }) {
     )
   }
 
+  // Materialize the profile exactly once. Returns the slug, or null on failure.
+  // Called by submit() and by the MCP setup buttons (so credentials can be
+  // configured mid-creation). Idempotent via createdRef.
+  const ensureAgentCreated = async () => {
+    if (createdRef.current) {
+      return createdRef.current
+    }
+    if (!valid || taken) {
+      return null
+    }
+
+    const descriptionText = [title, description].filter(Boolean).join(' — ')
+
+    await host.request('profiles.create', {
+      name: slug,
+      description: descriptionText,
+      clone_from: cloneFrom === '__none__' ? null : cloneFrom,
+      no_skills: noSkills,
+      // Shared (not copied) auth keeps ONE OAuth/token pool with the main
+      // profile, so refreshes can't invalidate each other. Older gateways
+      // ignore the param and copy — still functional, just forked.
+      share_auth: shareAuth,
+      soul: composeSoul({ name: slug, title, description, roster, customSoul: soul }),
+      ...(model.trim() && provider.trim() ? { model: model.trim(), provider: provider.trim() } : {})
+    })
+
+    createdRef.current = slug
+
+    // Apply capability picks from the Advanced tabs (best-effort; the
+    // profile exists either way and Edit Profile can finish the job).
+    try {
+      const capPayload = {}
+
+      if (dirtyCaps.skills && caps) {
+        capPayload.disabled_skills = caps.skills.filter(s => !s.enabled).map(s => s.name)
+      }
+      if (dirtyCaps.toolsets && caps) {
+        const en = caps.toolsets.filter(t => t.enabled)
+        capPayload.enabled_toolsets =
+          en.length === caps.toolsets.length || en.length === 0 ? [] : en.map(t => t.name)
+      }
+      if (dirtyCaps.mcp && caps) {
+        capPayload.enabled_mcp_servers = caps.mcp.filter(m => m.enabled).map(m => m.name)
+      }
+      if (Object.keys(capPayload).length) {
+        await host.request('profiles.configure', { name: slug, ...capPayload })
+      }
+    } catch {
+      /* capability application is best-effort */
+    }
+
+    saveBotMeta(slug, { shape, color, image, imageKind: image ? 'photo' : 'shape', title: title.trim(), created: Date.now() })
+    queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
+    return slug
+  }
+
   const submit = async () => {
     if (!valid || taken || busy) {
       return
@@ -3141,46 +3624,13 @@ function CreateAgentDialog({ open, onClose, roster }) {
     setError(null)
 
     try {
-      const descriptionText = [title, description].filter(Boolean).join(' — ')
-
-      await host.request('profiles.create', {
-        name: slug,
-        description: descriptionText,
-        clone_from: cloneFrom === '__none__' ? null : cloneFrom,
-        no_skills: noSkills,
-        // Shared (not copied) auth keeps ONE OAuth/token pool with the main
-        // profile, so refreshes can't invalidate each other. Older gateways
-        // ignore the param and copy — still functional, just forked.
-        share_auth: shareAuth,
-        soul: composeSoul({ name: slug, title, description, roster, customSoul: soul }),
-        ...(model.trim() && provider.trim() ? { model: model.trim(), provider: provider.trim() } : {})
-      })
-
-      // Apply capability picks from the Advanced tabs (best-effort; the
-      // profile exists either way and Edit Profile can finish the job).
-      try {
-        const capPayload = {}
-
-        if (dirtyCaps.skills && caps) {
-          capPayload.disabled_skills = caps.skills.filter(s => !s.enabled).map(s => s.name)
-        }
-        if (dirtyCaps.toolsets && caps) {
-          const en = caps.toolsets.filter(t => t.enabled)
-          capPayload.enabled_toolsets =
-            en.length === caps.toolsets.length || en.length === 0 ? [] : en.map(t => t.name)
-        }
-        if (dirtyCaps.mcp && caps) {
-          capPayload.enabled_mcp_servers = caps.mcp.filter(m => m.enabled).map(m => m.name)
-        }
-        if (Object.keys(capPayload).length) {
-          await host.request('profiles.configure', { name: slug, ...capPayload })
-        }
-      } catch {
-        /* capability application is best-effort */
+      const slugCreated = await ensureAgentCreated()
+      if (!slugCreated) {
+        setBusy(false)
+        setError('Could not create the agent.')
+        return
       }
 
-      saveBotMeta(slug, { shape, color, image, title: title.trim(), created: Date.now() })
-      queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
       host.notify({ kind: 'success', message: `Agent "${displayName({ name: slug, title })}" created` })
       reset()
       onClose()
@@ -3498,7 +3948,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                           className: 'grid gap-1',
                                           children: caps.mcp.map(m => {
                                             const needsSetup =
-                                              m.fromCatalog && !m.installed && (m.requires || []).length > 0
+                                              m.fromCatalog && !m.installed && ((m.requires || []).length > 0 || (m.auth || '').toLowerCase() === 'oauth')
 
                                             return jsxs(
                                               'label',
@@ -3514,23 +3964,36 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                                     className: 'min-w-0',
                                                     children: [
                                                       jsx('span', { children: m.name }),
-                                                      m.fromCatalog
+                                                      m.fromCatalog && !needsSetup
                                                         ? jsx('span', {
                                                             className: 'ml-1.5 text-[0.65rem] text-(--ui-text-quaternary)',
-                                                            children: needsSetup
-                                                              ? (setupProfile
-                                                                  ? null
-                                                                  : 'needs setup (' + (m.requires || []).join(', ') + ') — save the agent first, then set up here')
-                                                              : m.installed
-                                                                ? 'catalog · installed'
-                                                                : 'catalog'
+                                                            children: m.installed
+                                                              ? 'catalog · installed'
+                                                              : 'catalog'
                                                           })
                                                         : null,
-                                                      needsSetup && setupProfile
+                                                      needsSetup
                                                         ? jsx(McpSetupButton, {
-                                                            profile: setupProfile,
+                                                            profile: createdRef.current,
                                                             entry: m,
-                                                            onDone: () => toggleCap('mcp', m.name, true)
+                                                            ensureProfile: ensureAgentCreated,
+                                                            onDone: () => {
+                                                              // Setup done: mark installed so the row's
+                                                              // checkbox un-disables, and enable it.
+                                                              setCaps(prev =>
+                                                                prev
+                                                                  ? {
+                                                                      ...prev,
+                                                                      mcp: prev.mcp.map(x =>
+                                                                        x.name === m.name
+                                                                          ? { ...x, installed: true, enabled: true }
+                                                                          : x
+                                                                      )
+                                                                    }
+                                                                  : prev
+                                                              )
+                                                              setDirtyCaps(prev => ({ ...prev, mcp: true }))
+                                                            }
                                                           })
                                                         : null,
                                                       m.description
@@ -4285,6 +4748,198 @@ function RoutinesPane() {
   })
 }
 
+
+// ── A2A feedback loop ────────────────────────────────────────────────────────
+//
+// Shows results from the master heartbeat orchestrator: which bots ran,
+// what they reported, and whether deep research (OpenManus / Research Desk)
+// was triggered. Data reads from ~/.hermes/a2a_results/ written by
+// scripts/master-heartbeat.py.
+
+const A2A_RESULTS_DIR = `${(() => { try { return os_home() } catch { return '~/.hermes' } })()}/a2a_results`
+
+function os_home() {
+  // best-effort HERMES_HOME / HOME / USERPROFILE
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      return process.env.HERMES_HOME || process.env.HOME || process.env.USERPROFILE || '~/.hermes'
+    }
+  } catch { /* ignore */ }
+  return '~/.hermes'
+}
+
+/** Read latest result files from ~/.hermes/a2a_results/ */
+function useA2AResults() {
+  return useQuery({
+    queryKey: [ID, 'a2a-results'],
+    queryFn: async () => {
+      try {
+        const res = await host.request('terminal', {
+          command: `python -c "import os,json, glob; d='${A2A_RESULTS_DIR}'.replace('~', os.path.expanduser('~')); files=sorted(glob.glob(os.path.join(d,'*.json')))[-20:]; print(json.dumps([json.load(open(f)) for f in files]))"`,
+          timeout: 10
+        })
+        if (res?.stdout) {
+          return JSON.parse(res.stdout)
+        }
+      } catch { /* ignore */ }
+      return []
+    },
+    refetchInterval: 15000,
+    staleTime: 5000
+  })
+}
+
+/** Poll the master heartbeat cron status */
+function useHeartbeatStatus() {
+  return useQuery({
+    queryKey: [ID, 'heartbeat-status'],
+    queryFn: async () => {
+      try {
+        const res = await host.request('cron.manage', { action: 'list' })
+        const jobs = res?.jobs || []
+        const hb = jobs.find(j => j.name === 'Master Heartbeat (Bot Coordination)')
+        return hb || null
+      } catch { /* ignore */ }
+      return null
+    },
+    refetchInterval: 20000,
+    staleTime: 8000
+  })
+}
+
+function A2AFeedbackPane() {
+  const { data: results, isLoading: resultsLoading } = useA2AResults()
+  const { data: heartbeat } = useHeartbeatStatus()
+  const [expanded, setExpanded] = useState(null)
+
+  const resultsList = Array.isArray(results) ? results : []
+  const deepResearchCount = resultsList.filter(r => r?.requires_deep_research).length
+  const okCount = resultsList.filter(r => r?.result?.ok).length
+  const failCount = resultsList.length - okCount
+
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-2 px-3 pt-3 pb-2',
+        children: [
+          jsx('span', {
+            className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
+            children: 'A2A Feedback'
+          }),
+          jsxs('div', {
+            className: 'ml-auto flex items-center gap-1.5',
+            children: [
+              jsx('span', {
+                className: 'inline-flex items-center gap-1 rounded-full border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.65rem] text-(--ui-text-tertiary)',
+                children: resultsList.length > 0 ? `${okCount}✓ ${failCount}✗` : '—'
+              }),
+              deepResearchCount > 0 && jsx('span', {
+                className: 'inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[0.65rem] text-violet-400',
+                children: `\uD83D\uDD0D ${deepResearchCount}`
+              })
+            ]
+          })
+        ]
+      }),
+      jsx('div', { className: 'mx-3 border-t border-(--ui-stroke-secondary)' }),
+      heartbeat && jsxs('div', {
+        className: 'mx-3 mt-2 rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5',
+        children: [
+          jsxs('div', {
+            className: 'flex items-center gap-1.5',
+            children: [
+              jsx('span', {
+                className: cn('size-1.5 shrink-0 rounded-full', heartbeat.enabled !== false && heartbeat.state !== 'paused' ? 'bg-emerald-500' : 'bg-(--ui-text-quaternary)')
+              }),
+              jsx('span', {
+                className: 'truncate text-[0.65rem] font-medium',
+                children: 'Master Heartbeat'
+              })
+            ]
+          }),
+          jsx('div', {
+            className: 'text-[0.6rem] text-(--ui-text-quaternary)',
+            children: heartbeat.next_run_at ? `next ${relativeTime(new Date(heartbeat.next_run_at).getTime())}` : 'paused'
+          })
+        ]
+      }),
+      resultsLoading && !resultsList.length
+        ? jsx('div', {
+            className: 'flex flex-1 items-center justify-center',
+            children: jsx(GlyphSpinner, { spinner: 'breathe', className: 'text-(--ui-text-tertiary)' })
+          })
+        : resultsList.length === 0
+          ? jsxs('div', {
+              className: 'flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center',
+              children: [
+                jsx(Codicon, { name: 'pulse', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
+                jsx('div', {
+                  className: 'text-xs leading-5 text-(--ui-text-tertiary)',
+                  children: 'No heartbeat results yet. Waiting for the master heartbeat to run.'
+                })
+              ]
+            })
+          : jsx(ScrollArea, {
+              className: 'min-h-0 flex-1',
+              children: jsx('div', {
+                className: 'grid gap-1 px-2.5 py-2',
+                children: resultsList.slice().reverse().map((item, idx) => {
+                  const isExpanded = expanded === idx
+                  return jsxs('div', {
+                    className: 'rounded-lg border border-(--ui-stroke-secondary) p-2 transition-colors hover:border-(--ui-stroke-primary, var(--ui-stroke-secondary))',
+                    children: [
+                      jsxs('div', {
+                        className: 'flex items-center gap-2 cursor-pointer',
+                        onClick: () => setExpanded(isExpanded ? null : idx),
+                        children: [
+                          jsx('span', {
+                            className: cn('size-1.5 shrink-0 rounded-full', item?.result?.ok ? 'bg-emerald-500' : 'bg-rose-500')
+                          }),
+                          jsx('span', {
+                            className: 'min-w-0 flex-1 truncate text-xs font-medium',
+                            children: item?.profile || 'unknown'
+                          }),
+                          item?.requires_deep_research && jsx('span', {
+                            className: 'text-[0.6rem] text-violet-400',
+                            children: '\uD83D\uDD0D'
+                          }),
+                          jsx('span', {
+                            className: 'text-[0.6rem] text-(--ui-text-quaternary)',
+                            children: item?.timestamp ? item.timestamp.slice(0, 12) : ''
+                          })
+                        ]
+                      }),
+                      isExpanded && jsxs('div', {
+                        className: 'mt-2 grid gap-1.5',
+                        children: [
+                          jsxs('div', {
+                            className: 'text-[0.65rem] text-(--ui-text-tertiary)',
+                            children: [jsx('span', { className: 'font-medium', children: 'Task: ' }), item?.result?.task || '—']
+                          }),
+                          jsxs('div', {
+                            className: 'max-h-20 overflow-y-auto rounded bg-(--ui-bg, transparent) p-1 text-[0.6rem] text-(--ui-text-quaternary)',
+                            children: [jsx('span', { className: 'font-medium', children: 'Output: ' }), item?.result?.output?.slice(0, 200) || '—']
+                          }),
+                          item?.trigger && jsxs('div', {
+                            className: 'text-[0.6rem] text-violet-400',
+                            children: [jsx('span', { className: 'font-medium', children: 'Trigger: ' }), item.trigger]
+                          }),
+                          item?.error && jsxs('div', {
+                            className: 'text-[0.6rem] text-rose-400',
+                            children: [jsx('span', { className: 'font-medium', children: 'Error: ' }), item.error]
+                          })
+                        ]
+                      })
+                    ]
+                  }, `${item?.profile}-${item?.timestamp}-${idx}`)
+                })
+              })
+            })
+    ]
+  })
+}
+
 // ── roster pane ──────────────────────────────────────────────────────────────
 
 function BotsPane() {
@@ -4515,6 +5170,7 @@ export default {
   name: 'Bots',
   register(ctx) {
     pluginCtx = ctx
+    startFaceClock()
 
     // Keyframes for the pet bob — injected because plugin classes aren't in
     // the app's precompiled CSS. Idempotent across hot reloads.
@@ -4531,8 +5187,13 @@ export default {
     try {
       Promise.resolve(ctx.storage?.get?.('bot-meta'))
         .then(value => {
-          if (value && typeof value === 'object') {
-            $botMeta.set(value)
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const live = $botMeta.get()
+            const next = { ...value }
+            for (const name of Object.keys(live)) {
+              next[name] = { ...(value[name] || {}), ...live[name] }
+            }
+            $botMeta.set(next)
           }
         })
         .catch(() => undefined)
@@ -4582,6 +5243,21 @@ export default {
       },
       render: () => jsx(RoutinesPane, {})
     })
+
+
+    // A2A Feedback — shows heartbeat results + deep research triggers
+    ctx.register({
+      id: 'a2a-feedback',
+      area: 'panes',
+      title: 'A2A Feedback',
+      data: {
+        placement: 'main',
+        dock: { pane: 'workspace', pos: 'right' },
+        width: '250px'
+      },
+      render: () => jsx(A2AFeedbackPane, {})
+    })
+
 
     ctx.register({
       id: 'new-agent',
