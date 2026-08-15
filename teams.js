@@ -448,7 +448,7 @@ export function assertTeamGeneration(generation) {
  * @returns {Promise<Record<string,string>>} map member → reply
  */
 export async function runTeamFanout(team, message, deps = {}) {
-  const { host, storage, generation } = deps || {}
+  const { host, generation } = deps || {}
   if (!host || typeof host.request !== 'function' || typeof host.onEvent !== 'function') {
     throw new Error('runTeamFanout requires an injected host with request + onEvent')
   }
@@ -463,16 +463,33 @@ export async function runTeamFanout(team, message, deps = {}) {
     : members.slice()
 
   const replies = {}
-  const pending = new Map() // session_id → { member, resolve, reject }
+  // D16: key waiters by member (not session_id) so a duplicate session_id from
+  // the host cannot silently drop a member's reply. The latest member wins the
+  // key, but every member still gets a waiter that resolves into `replies`.
+  const pending = new Map() // member → { resolve, reject, promise }
 
   const onComplete = (ev) => {
     if (!ev || !ev.session_id) return
-    const waiter = pending.get(ev.session_id)
+    // D16: a host may (incorrectly) return a duplicate session_id for several
+    // members. Track ALL owners per id and resolve them one-by-one as
+    // completions arrive, so no member's reply is silently dropped and no
+    // waiter is left orphaned (which would hang the fanout).
+    const owners = sessionOwner.get(ev.session_id)
+    if (!owners || owners.length === 0) return
+    const member = owners.shift()
+    const waiter = pending.get(member)
     if (!waiter) return
-    pending.delete(ev.session_id)
+    pending.delete(member)
     waiter.resolve(ev.content != null ? String(ev.content) : '')
   }
+  const sessionOwner = new Map() // session_id → [member, ...] (D16 multi-owner)
+  // D17: if onEvent returns a non-function disposer, fall back to host.off(cb)
+  // so the handler is still removed and we don't leak handlers across fanouts.
   const off = host.onEvent('message.complete', onComplete)
+  const dispose = () => {
+    if (typeof off === 'function') off()
+    else if (typeof host.off === 'function') host.off('message.complete', onComplete)
+  }
 
   // CA6b: fail-closed timeout — reject all waiters, never hang.
   let timeoutId
@@ -503,10 +520,11 @@ export async function runTeamFanout(team, message, deps = {}) {
         replies[member] = '' // cannot correlate completion
         continue
       }
+      sessionOwner.set(sessionId, (sessionOwner.get(sessionId) || []).concat(member)) // D16: multi-owner
       const waiter = new Promise((resolve, reject) => {
-        pending.set(sessionId, { member, resolve, reject, promise: null })
+        pending.set(member, { member, resolve, reject, promise: null })
       })
-      pending.get(sessionId).promise = waiter
+      pending.get(member).promise = waiter
       waiter.then((content) => { replies[member] = content }).catch(() => { replies[member] = '' })
       await host.request('prompt.submit', { session_id: sessionId, message })
     }
@@ -518,7 +536,7 @@ export async function runTeamFanout(team, message, deps = {}) {
     for (const w of pending.values()) w.reject(err)
     throw err
   } finally {
-    if (typeof off === 'function') off()
+    dispose() // D17: remove handler (function disposer or host.off fallback)
     if (timeoutId) clearTimeout(timeoutId)
   }
 }

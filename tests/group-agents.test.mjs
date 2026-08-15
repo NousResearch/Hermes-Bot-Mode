@@ -705,6 +705,55 @@ test('assertTeamGeneration throws on mismatch, passes on match', () => {
 
 // ── Recuperation D14 / D15 (revue Task 5) ──────────────────────────────────
 
+test('D16: duplicate session_id from host does not silently drop a member reply', async () => {
+  const T = loadTeams()
+  const team = { id: 'co-a', lead: 'alice', members: ['alice', 'bob'] }
+  // Host returns the SAME session_id for both members (collision scenario).
+  const handlers = []
+  const host = {
+    request(method) {
+      if (method === 'session.create') return Promise.resolve({ session_id: 'dup' })
+      if (method === 'prompt.submit') return Promise.resolve()
+      return Promise.resolve()
+    },
+    onEvent(event, cb) {
+      handlers.push(cb)
+      return () => {}
+    }
+  }
+  // Fire completions for BOTH members (same session_id, two events).
+  setTimeout(() => {
+    for (const h of handlers) h({ session_id: 'dup', content: 'ALICE-REPLY' })
+    for (const h of handlers) h({ session_id: 'dup', content: 'BOB-REPLY' })
+  }, 5)
+  const replies = await T.runTeamFanout(team, 'hi', { host })
+  // Both members must appear in replies keyed by member (no silent drop, no hang).
+  assert.equal(replies.alice, 'ALICE-REPLY')
+  assert.equal(replies.bob, 'BOB-REPLY')
+})
+
+test('D17: handler is removed via host.off fallback when onEvent returns non-function', async () => {
+  const T = loadTeams()
+  const team = { id: 'co-a', lead: 'alice', members: ['alice'] }
+  let offCalled = false
+  const handlers = []
+  const host = {
+    request(method) {
+      if (method === 'session.create') return Promise.resolve({ session_id: 's1' })
+      if (method === 'prompt.submit') {
+        setTimeout(() => { for (const h of handlers) h({ session_id: 's1', content: 'A' }) }, 1)
+        return Promise.resolve()
+      }
+      return Promise.resolve()
+    },
+    // onEvent returns undefined (non-function disposer) → must fall back to off.
+    onEvent(event, cb) { handlers.push(cb); return undefined },
+    off(event, cb) { offCalled = true; const i = handlers.indexOf(cb); if (i >= 0) handlers.splice(i, 1) }
+  }
+  await T.runTeamFanout(team, 'hi', { host })
+  assert.equal(offCalled, true, 'host.off fallback must be used to remove the handler')
+})
+
 test('D14: deleteTeam removes the key via storage.remove (no tombstone)', async () => {
   const T = loadTeams()
   const data = new Map([['team-log:co-a', [{ ts: 1, text: 'x' }]]])
