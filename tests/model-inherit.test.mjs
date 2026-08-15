@@ -87,5 +87,5 @@ test('regression: an advanced-section failure suppresses the contradictory succe
   const dialog = source.slice(start, end)
 
   assert.match(dialog, /let advancedFailed = false/)
-  assert.match(dialog, /if \(!advancedFailed\) \{\s*host\.notify\(\{ kind: 'success'/)
+  assert.match(dialog, /if \(!advancedFailed && lookPersisted\) \{\s*host\.notify\(\{ kind: 'success'/)
 })

@@ -136,7 +136,7 @@ const $selectedBot = atom('default')
  *  { [botName]: { shape, color, title } } */
 const $botMeta = atom({})
 
-function saveBotMeta(name, patch) {
+async function saveBotMeta(name, patch) {
   const next = { ...$botMeta.get(), [name]: { ...($botMeta.get()[name] || {}), ...patch } }
   $botMeta.set(next)
 
@@ -149,18 +149,18 @@ function saveBotMeta(name, patch) {
 
   // Server-side (source of truth when supported): profile.yaml ui_meta,
   // namespaced under this plugin's id — every client machine sees the same
-  // roster. Older gateways reject the param shape; that's fine, local wins.
-  // Data-URL fields are stripped from ui_meta (64KB cap, rides every
-  // profiles.list); the avatar IMAGE goes to the profile asset store
-  // instead (profiles.set_asset), which is server-side and uncapped by the
-  // list call — so pfps follow the profile across machines too.
+  // roster. Return the outcome so user-initiated saves can distinguish a
+  // cross-machine save from a local-only fallback instead of reporting a
+  // false success. Data-URL fields are stripped from ui_meta (64KB cap,
+  // rides every profiles.list); the avatar IMAGE goes to the profile asset
+  // store instead (profiles.set_asset), which is server-side and uncapped by
+  // the list call — so pfps follow the profile across machines too.
+  let serverRequest = null
   try {
     const { image, pet, ...rest } = next[name] || {}
-    host
-      .request('profiles.configure', { name, ui_meta: { 'hermes-bots': rest } })
-      .catch(() => undefined)
+    serverRequest = Promise.resolve(host.request('profiles.configure', { name, ui_meta: { 'hermes-bots': rest } }))
   } catch {
-    /* older gateway */
+    /* older/unavailable gateway — the local fallback remains saved */
   }
 
   // Avatar image → profile asset store (feature-detected; local storage
@@ -175,6 +175,18 @@ function saveBotMeta(name, patch) {
       /* older gateway */
     }
   }
+
+  let serverPersisted = false
+  if (serverRequest) {
+    try {
+      const result = await serverRequest
+      serverPersisted = result?.applied?.ui_meta === true
+    } catch {
+      /* older/unavailable gateway — the local fallback remains saved */
+    }
+  }
+
+  return { serverPersisted }
 }
 
 /** Flip the "hide Bot Chats from the sidebar" pref, persist it, and reconcile
@@ -3332,7 +3344,7 @@ function EditProfileDialog({ bot, open, onClose }) {
 
     setBusy(true)
     let advancedFailed = false
-    saveBotMeta(bot.name, {
+    const persistence = await saveBotMeta(bot.name, {
       shape,
       color,
       image,
@@ -3340,6 +3352,13 @@ function EditProfileDialog({ bot, open, onClose }) {
       title: title.trim(),
       custom: true
     })
+    const lookPersisted = persistence.serverPersisted
+
+    if (!lookPersisted) {
+      host.notify({ kind: 'error', message: 'Saved look locally; remote persistence failed' })
+    } else {
+      queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
+    }
 
     const desc = description.trim()
     if (desc !== (bot.description || '').trim()) {
@@ -3368,7 +3387,7 @@ function EditProfileDialog({ bot, open, onClose }) {
       }
     }
 
-    if (!advancedFailed) {
+    if (!advancedFailed && lookPersisted) {
       host.notify({ kind: 'success', message: `${displayName(bot, { title })} updated` })
     }
     setBusy(false)
