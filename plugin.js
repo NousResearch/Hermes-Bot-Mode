@@ -1533,6 +1533,24 @@ function showsHandle(name, meta) {
   return Boolean(name && display.toLowerCase() !== botHandle(name).toLowerCase())
 }
 
+/** Composer `@`-picker provider (#43): every roster bot except the active
+ *  profile, as a grouped "Bots" entry. Reads the warm roster snapshot so
+ *  mentions stay current without a fetch per keystroke. */
+function resolveMentions({ gatewayProfile }) {
+  const roster = $lastRoster.get() || []
+  const active = (gatewayProfile || '').trim().toLowerCase()
+  const meta = $botMeta.get()
+
+  return roster
+    .filter(bot => bot?.name && bot.name.toLowerCase() !== active)
+    .map(bot => ({
+      text: '@' + botHandle(bot.name),
+      display: displayName(bot, meta[bot.name]),
+      meta: bot.description || bot.title || 'Agent',
+      group: 'Bots'
+    }))
+}
+
 // ── canonical bot chat ───────────────────────────────────────────────────────
 // Each bot has ONE forever chat, pinned by stored-session id in bot meta
 // (meta.chat — synced server-side via ui_meta, so it follows the profile).
@@ -4610,6 +4628,18 @@ export default {
         width: '250px'
       },
       render: () => jsx(RoutinesPane, {})
+    })
+
+    ctx.register({
+      id: 'mention-provider',
+      area: COMPOSER_AREAS.mentions,
+      data: {
+        // Offer every roster bot in the composer's `@` picker (#43). Reads the
+        // live roster snapshot the Bots pane poll keeps warm ($lastRoster), so
+        // mentions stay current without a fetch per keystroke. The active
+        // profile is excluded — you can't hand off to yourself.
+        resolve: resolveMentions
+      }
     })
 
     ctx.register({
