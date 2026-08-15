@@ -4472,8 +4472,13 @@ export default {
     try {
       Promise.resolve(ctx.storage?.get?.('bot-meta'))
         .then(value => {
-          if (value && typeof value === 'object') {
-            $botMeta.set(value)
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const live = $botMeta.get()
+            const next = { ...value }
+            for (const name of Object.keys(live)) {
+              next[name] = { ...(value[name] || {}), ...live[name] }
+            }
+            $botMeta.set(next)
           }
         })
         .catch(() => undefined)
