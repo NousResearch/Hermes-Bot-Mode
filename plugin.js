@@ -1521,8 +1521,9 @@ const canonicalCreations = new Map()
 /** Create the bot's ONE forever chat: a real session opened with a kickoff
  *  message (the gateway prunes zero-message sessions, so the chat is born
  *  with the bot introducing itself). Pins the stored id in bot meta and
- *  returns it. */
-function createCanonicalChat(name) {
+ *  returns it. Pass { navigate: false } to create WITHOUT moving the user's
+ *  view (used by the @mention pre-flight — the user stays in their chat). */
+function createCanonicalChat(name, { navigate = true } = {}) {
   const inflight = canonicalCreations.get(name)
 
   if (inflight) {
@@ -1545,7 +1546,7 @@ function createCanonicalChat(name) {
     // an unmounted session left the intro reply invisible until reopen.
     let opened = false
 
-    if (sid && typeof host.openSession === 'function') {
+    if (navigate && sid && typeof host.openSession === 'function') {
       try {
         await host.openSession(sid, { profile: name })
         opened = true
@@ -1561,7 +1562,7 @@ function createCanonicalChat(name) {
       try {
         await host.request('prompt.submit', { session_id: runtime, text: 'Hey, tell me about yourself!' })
 
-        if (!opened && sid && typeof host.openSession === 'function') {
+        if (navigate && !opened && sid && typeof host.openSession === 'function') {
           await host.openSession(sid, { profile: name })
         }
       } catch (err) {
@@ -1579,6 +1580,34 @@ function createCanonicalChat(name) {
   canonicalCreations.set(name, run)
 
   return run
+}
+
+/** Ensure a bot's canonical chat exists WITHOUT navigating the UI to it.
+ *  Used by the @mention middleware so a handoff command can never fail with
+ *  "No session found matching 'Bot Chat'" (#48). Adopts an existing
+ *  "Bot Chat" session when the pin is missing (created via CLI/gateway)
+ *  instead of minting a duplicate. Returns the pinned stored-session id. */
+async function ensureCanonicalChat(name) {
+  const pinned = $botMeta.get()[name]?.chat
+
+  if (pinned) {
+    return pinned
+  }
+
+  try {
+    const res = await host.request('session.list', { profile: name, limit: 100 })
+    const rows = res?.sessions ?? []
+    const canonical = rows.find(s => (s.title || '').trim().toLowerCase() === 'bot chat')
+
+    if (canonical?.id) {
+      saveBotMeta(name, { chat: canonical.id })
+      return canonical.id
+    }
+  } catch {
+    // Gateway hiccup — fall through to creation.
+  }
+
+  return createCanonicalChat(name, { navigate: false })
 }
 
 async function openBotCanonicalChat(name, pinned) {
@@ -4595,6 +4624,17 @@ export default {
             return draft
           }
 
+          // Pre-flight: every mentioned bot must have a canonical "Bot Chat"
+          // before the handoff command is composed. Without this, a bot that
+          // never had a chat created would make `-c "Bot Chat"` fail and the
+          // reply silently drop (#48). ensureCanonicalChat adopts an existing
+          // "Bot Chat" session or creates one WITHOUT navigating the UI, so
+          // the user stays in their own chat.
+          const preflight = await Promise.allSettled(
+            mentioned.map(n => ensureCanonicalChat(n))
+          )
+          const preflightFailed = mentioned.filter((_, i) => preflight[i].status === 'rejected')
+
           // The ACTIVE BOT composes the message — it understands intent; a
           // text pipe never can. Delivery is the one blessed command into the
           // recipient's canonical Bot Chat, so their side reads as a normal
@@ -4606,6 +4646,10 @@ export default {
             '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
             'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim. Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
             mentioned.map(n => '`hermes -p ' + n + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + senderName + ' (@' + botHandle(active) + '): <your composed message>"`').join('\n') +
+            (preflightFailed.length
+              ? '\nNOTE: the canonical chat could not be pre-created for: ' + preflightFailed.map(botHandle).join(', ') +
+                '. If the send fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`.'
+              : '') +
             '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
             'Relay the reply back to the user, attributed to that agent.]'
 
