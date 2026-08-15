@@ -15,7 +15,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 - **Delete Profile** (right-click) — permanently remove a bot after the same destructive confirmation used by Hermes Desktop's profile menu. The default profile cannot be deleted.
 - **Avatars** — cute geometric faces (7 shapes × 10 colors with blinking eyes that scan while the bot works), an uploaded image, an AI-generated portrait (when an image backend is configured), or a pixel **pet** companion that bounces beside the avatar while the bot is busy.
 - **Routines pane** — recurring tasks per bot, backed by Hermes cron. "Summarize my inbox every morning" lives next to the bot that does it. Runs land in the bot's own chat history.
-- **Bot-to-bot messaging** — every bot has a persistent **Agent Inbox** conversation. Bots message each other with attribution (`[Message from agent 'researcher']`), and their SOUL.md teaches them the protocol, including how to reply.
+- **Bot-to-bot messaging** — every bot has a persistent **Bot Chat** conversation. Bots message each other with attribution (`Message from 🤖 researcher (@researcher): ...`), and their SOUL.md teaches them the protocol, including how to reply.
 - **@mentions** — type `@researcher have a look at this` in any chat and the active bot hands the message off, waits for the reply, and reports back.
 
 ## How it works
@@ -26,7 +26,7 @@ A bot **is** a Hermes profile — isolated config, memory, skills, credentials, 
 - Creation/editing rides the `profiles.*` gateway RPCs (`list`, `create`, `describe`, `configure`).
 - Avatar generation uses the `image.generate` RPC and works over both local and remote gateways (results return as data URLs).
 - Routines are plain Hermes cron jobs namespaced `[bot:<name>] <routine>` — they also show up in `hermes cron list` and the core Cron page.
-- Bot-to-bot messages are real CLI handoffs: `hermes -p <bot> chat -c "Agent Inbox" -q "..."`.
+- Bot-to-bot messages are real CLI handoffs: `hermes -p <bot> chat --in ~ -c "Bot Chat" -Q -q "Message from 🤖 <sender> (@<sender>): ..."`.
 
 No core patches, no background daemons, no extra storage: everything is standard Hermes surface.
 
