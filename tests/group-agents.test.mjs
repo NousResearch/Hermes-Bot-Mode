@@ -294,3 +294,131 @@ test('CA2l (D3): non-array rosterNames yields empty roster → no teams kept', (
   )
   assert.deepEqual(result, [])
 })
+
+// ── projectTeamContext (CA4/CA4b/CA4c/CA10b): team-log isolation (RG5) ────────
+
+function makeStorage(logMap) {
+  return { get: async (k) => (k in logMap ? logMap[k] : null) }
+}
+
+test('CA4: projectTeamContext returns ONLY the calling team\'s rows (RG5 isolation)', async () => {
+  const { projectTeamContext } = loadTeams()
+  const logs = {
+    'team-log:teamA': [{ ts: 1, text: 'Company A plan' }],
+    'team-log:teamB': [{ ts: 1, text: 'Company B secret' }],
+    'team-log:teamOther': [{ ts: 1, text: 'Other company secret' }]
+  }
+  const storage = makeStorage(logs)
+  const res = await projectTeamContext({ id: 'teamA' }, 't1', { storage })
+  assert.ok(res.rows.some((r) => r.text.includes('Company A plan')))
+  assert.ok(!res.rows.some((r) => r.text.includes('Company B secret')))
+  assert.ok(!res.rows.some((r) => r.text.includes('Other company secret')))
+})
+
+test('CA4b: projectTeamContext isolates by department', async () => {
+  const { projectTeamContext } = loadTeams()
+  const logs = {
+    'team-log:support': [{ ts: 1, text: 'Support escalate' }],
+    'team-log:softwaredev': [{ ts: 1, text: 'SD refactor' }],
+    'team-log:itops': [{ ts: 1, text: 'IT patch' }]
+  }
+  const storage = makeStorage(logs)
+  const res = await projectTeamContext({ id: 'support' }, 't1', { storage })
+  assert.ok(res.rows.some((r) => r.text.includes('Support escalate')))
+  assert.ok(!res.rows.some((r) => r.text.includes('SD refactor')))
+  assert.ok(!res.rows.some((r) => r.text.includes('IT patch')))
+})
+
+test('CA4c: projectTeamContext generic team isolation', async () => {
+  const { projectTeamContext } = loadTeams()
+  const logs = {
+    'team-log:teamX': [{ ts: 1, text: 'X only' }],
+    'team-log:teamY': [{ ts: 1, text: 'Y only' }]
+  }
+  const storage = makeStorage(logs)
+  const res = await projectTeamContext({ id: 'teamX' }, 't1', { storage })
+  assert.ok(res.rows.some((r) => r.text.includes('X only')))
+  assert.ok(!res.rows.some((r) => r.text.includes('Y only')))
+})
+
+test('CA10b: projectTeamContext bounds to TEAM_CONTEXT_ROW_LIMIT rows and TEAM_CONTEXT_CHAR_LIMIT chars', async () => {
+  const { projectTeamContext, TEAM_CONTEXT_ROW_LIMIT, TEAM_CONTEXT_CHAR_LIMIT } = loadTeams()
+  const rows = []
+  for (let i = 0; i < 30; i++) rows.push({ ts: i + 1, text: `row ${i} content payload data` })
+  const storage = makeStorage({ 'team-log:big': rows })
+  const res = await projectTeamContext({ id: 'big' }, 't1', { storage })
+  assert.equal(res.rows.length, TEAM_CONTEXT_ROW_LIMIT)
+  assert.ok(res.chars <= TEAM_CONTEXT_CHAR_LIMIT)
+})
+
+test('CA10b-trim: an oversized row is trimmed to fit the char limit', async () => {
+  const { projectTeamContext, TEAM_CONTEXT_CHAR_LIMIT } = loadTeams()
+  const big = 'x'.repeat(TEAM_CONTEXT_CHAR_LIMIT + 5000)
+  const storage = makeStorage({ 'team-log:big': [{ ts: 1, text: big }] })
+  const res = await projectTeamContext({ id: 'big' }, 't1', { storage })
+  assert.equal(res.rows.length, 1)
+  assert.ok(res.chars <= TEAM_CONTEXT_CHAR_LIMIT)
+  assert.equal(res.rows[0].text.length, TEAM_CONTEXT_CHAR_LIMIT)
+})
+
+// ── teamTargets hardening (D4/D5/D6) ──────────────────────────────────────────
+
+test('D4a: mention wrapped in parens still routes', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('see (@bob) now', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: [] })
+})
+
+test('D4b: mention wrapped in brackets still routes', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('cc [@bob] please', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: [] })
+})
+
+test('D4c: mention wrapped in quotes still routes', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('hi "@bob" there', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: [] })
+})
+
+test('D4d: consecutive mentions @bob@alice both route', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('@bob@alice', ['bob', 'alice'], ['bob', 'alice'])
+  assert.deepEqual(res, { targets: ['bob', 'alice'], unknown: [] })
+})
+
+test('D4e: trailing punctuation is not part of the handle', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('@bob. and @bob, end', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: [] })
+})
+
+test('D5: unicode handle @Bôb routes as Bôb (not unknown [B])', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('hey @Bôb', ['Bôb'], ['Bôb'])
+  assert.deepEqual(res, { targets: ['Bôb'], unknown: [] })
+})
+
+test('D6a (CA3): a real member mentioned inside an inline code span is excluded', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('run `@bob` command', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: [], unknown: [] })
+})
+
+test('D6b (CA3): mentions inside a fenced block are excluded', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('```\n@bob @alice\n```', ['bob', 'alice'], ['bob', 'alice'])
+  assert.deepEqual(res, { targets: [], unknown: [] })
+})
+
+test('D6c (CA3): dedupe and preserve first-seen order', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('@bob @alice @bob', ['bob', 'alice'], ['bob', 'alice'])
+  assert.deepEqual(res, { targets: ['bob', 'alice'], unknown: [] })
+})
+
+test('D6d (CA3): null text and empty members does not throw', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets(null, [], [])
+  assert.deepEqual(res, { targets: [], unknown: [] })
+})

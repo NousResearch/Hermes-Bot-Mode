@@ -73,10 +73,16 @@ export function teamTargets(text, members, roster = []) {
   const unknown = []
   const seenTargets = new Set()
   const seenUnknown = new Set()
-  const mentionRe = /(^|\s)@([a-z0-9][a-z0-9_-]*)/gi
+  // D4/D5: capture `@handle` where handle ∈ \p{L}\p{N}_- (Unicode, `u` flag).
+  // Look-behind `(?<!@)` lets a mention route even when preceded by punctuation,
+  // brackets, or quotes (D4: `(@bob)`, `[@bob]`, `"@bob`, `@bob@alice`). Trailing
+  // punctuation (`.`, `,`) is never part of the handle. The spec's `(?<![\w@])`
+  // is narrowed to `(?<!@)` so consecutive mentions `@bob@alice` both route
+  // (the required acceptance case). See DETTE.md D4 (resolution note).
+  const mentionRe = /(?<!@)@([\p{L}\p{N}_-]+)/gu
   let m
   while ((m = mentionRe.exec(cleaned)) !== null) {
-    const name = m[2]
+    const name = m[1]
     const lower = name.toLowerCase()
     if (memberByLower.has(lower)) {
       if (!seenTargets.has(lower)) {
@@ -91,8 +97,60 @@ export function teamTargets(text, members, roster = []) {
   return { targets, unknown }
 }
 
-export function projectTeamContext() {
-  throw new Error('not implemented')
+/**
+ * projectTeamContext — assemble the bounded team-log context for a turn.
+ *
+ * Reads ONLY `team-log:<team.id>` from storage (never another team's key),
+ * proving RG5 isolation: a team's context can never include another team's
+ * data. Rows are sorted by `ts` ascending, sliced to TEAM_CONTEXT_ROW_LIMIT
+ * (24 rows), then further bounded so total chars <= TEAM_CONTEXT_CHAR_LIMIT
+ * (24000); tail rows that would exceed the budget are dropped, and a single
+ * oversized row is trimmed to fit. Missing log → { rows: [], chars: 0 }.
+ *
+ * Pure I/O contract: storage is injected via `opts.storage` (or a global
+ * `globalThis.__teamStorage`), so this stays a testable unit (RG1).
+ */
+export async function projectTeamContext(team, turnId, opts = {}) {
+  const storage =
+    (opts && opts.storage) ||
+    (typeof globalThis !== 'undefined' ? globalThis.__teamStorage : null)
+  if (!storage || typeof storage.get !== 'function') {
+    return { rows: [], chars: 0 }
+  }
+  const key = `team-log:${team && team.id != null ? team.id : ''}`
+  const raw = await storage.get(key)
+  if (!raw) return { rows: [], chars: 0 }
+  // Each log entry: { ts, text } (or any text-bearing row). Read ONLY the
+  // calling team's key — RG5 isolation.
+  let rows = Array.isArray(raw) ? raw.slice() : []
+  rows.sort((a, b) => ((a && a.ts) || 0) - ((b && b.ts) || 0))
+  if (rows.length > TEAM_CONTEXT_ROW_LIMIT) {
+    rows = rows.slice(0, TEAM_CONTEXT_ROW_LIMIT)
+  }
+  let total = 0
+  const kept = []
+  for (const r of rows) {
+    const s =
+      r && typeof r.text === 'string'
+        ? r.text
+        : r && r.content != null
+          ? String(r.content)
+          : ''
+    const len = s.length
+    const remaining = TEAM_CONTEXT_CHAR_LIMIT - total
+    if (len <= remaining) {
+      kept.push(r)
+      total += len
+    } else if (remaining > 0) {
+      // Trim the row's text to fit the remaining char budget.
+      kept.push({ ...r, text: s.slice(0, remaining) })
+      total += remaining
+      break
+    } else {
+      break
+    }
+  }
+  return { rows: kept, chars: total }
 }
 
 export function teamPrompt() {
