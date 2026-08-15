@@ -3494,7 +3494,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
     setColor(AVATAR_COLORS[3])
     setImage(null)
     setAdvanced(false)
-    setCloneFrom('__none__')
+    // Same default as the initial useState — resetting to '__none__' made
+    // the second agent you create silently start from a fresh profile
+    // instead of cloning the main one like the first dialog open did.
+    setCloneFrom('default')
     setModel('')
     setProvider('')
     setSoul('')
