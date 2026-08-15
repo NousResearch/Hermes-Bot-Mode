@@ -2574,7 +2574,7 @@ function isOrchestrator(name) {
 
 function classifyGroupAsk(text, roster, active) {
   const hay = String(text || '').toLowerCase()
-  if (!/(?:ask (?:the )?(?:group|team|everyone|others)|tell (?:the )?(?:group|team|everyone)|check(?: in)? with (?:the )?(?:group|team|everyone)|how(?:'?s| is| are) (?:the )?(?:group|team|everyone)|hows the group|group doing|ping (?:the )?(?:group|team)|how are (?:you )?(?:both|all)|how is everyone)/.test(hay)) {
+  if (!/(?:ask (?:the )?(?:group|team|everyone|others)|tell (?:the )?(?:group|team|everyone)|what(?:'s|s| is| does| do) (?:the )?(?:group|team|everyone) think|(?:the )?(?:group|team) think|check(?: in)? with (?:the )?(?:group|team|everyone)|how(?:'?s| is| are) (?:the )?(?:group|team|everyone)|hows the group|group doing|ping (?:the )?(?:group|team)|cross[- ]?talk|how are (?:you )?(?:both|all)|how is everyone)/.test(hay)) {
     return []
   }
   const self = String(active || '').toLowerCase()
