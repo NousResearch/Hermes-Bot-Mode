@@ -461,12 +461,20 @@ async function deleteBot(bot) {
 // Radix ScrollArea's viewport wraps children in a display:table div that
 // sizes to content — unbounded width means `truncate` below it never fires
 // and previews run through the panel edge. Scope-limited corrective.
+//
+// A second Radix quirk bites in the dialogs: the viewport is height:100%,
+// which computes to auto when the root only has max-height (no definite
+// height anywhere up the chain) — the viewport grows to full content height,
+// the root's overflow:hidden clips it, and NOTHING scrolls (#88). Capping
+// the viewport itself (inheriting the root's max-height) makes it the real
+// scroll container; lists shorter than the cap still shrink to fit.
 if (typeof document !== 'undefined' && !document.getElementById('hermes-bots-roster-css')) {
   const style = document.createElement('style')
   style.id = 'hermes-bots-roster-css'
   style.textContent =
     '.hermes-bots-roster [data-radix-scroll-area-viewport] > div {' +
     ' display: block !important; width: 100%; min-width: 0; }' +
+    '.hermes-scroll-cap > [data-radix-scroll-area-viewport] { max-height: inherit; }' +
     '@keyframes hermes-bots-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }' +
     '.hermes-bots-pulse { animation: hermes-bots-pulse 1.2s ease-in-out infinite; }'
   document.head.appendChild(style)
@@ -2817,6 +2825,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
               onChange: event => setSkillFilter(event.target.value)
             }),
             jsx(ScrollArea, {
+              className: 'hermes-scroll-cap',
               style: { maxHeight: 180 },
               children: jsx(CheckList, { items: visibleSkills, onToggle: toggleSkill, columns: 2 })
             }),
@@ -2837,6 +2846,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         jsx('div', {
           className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
           children: jsx(ScrollArea, {
+            className: 'hermes-scroll-cap',
             style: { maxHeight: 320 },
             children: jsx('div', {
               className: 'grid gap-1.5',
@@ -2893,6 +2903,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
                   children: 'No MCP servers configured or in the catalog.'
                 })
               : jsx(ScrollArea, {
+                  className: 'hermes-scroll-cap',
                   style: { maxHeight: 180 },
                   children: jsx('div', {
                     className: 'grid gap-1 p-2',
@@ -3158,6 +3169,7 @@ function HubSkillsSection({ forProfile, onInstalled }) {
               children: 'No hub skills matched.'
             })
           : jsx(ScrollArea, {
+              className: 'hermes-scroll-cap',
               style: { maxHeight: 150 },
               children: jsx('div', {
                 className: 'grid gap-1',
@@ -3890,6 +3902,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                       onChange: event => setCapFilter(event.target.value)
                                     }),
                                     jsx(ScrollArea, {
+                                      className: 'hermes-scroll-cap',
                                       style: { maxHeight: 200 },
                                       children: jsx(CheckList, {
                                         items: capFilter.trim()
@@ -3921,6 +3934,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                   className: 'grid gap-1.5',
                                   children: [
                                     jsx(ScrollArea, {
+                                      className: 'hermes-scroll-cap',
                                       style: { maxHeight: 200 },
                                       children: jsx(CheckList, {
                                         items: caps.toolsets,
@@ -3943,6 +3957,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                     className: 'grid gap-1.5',
                                     children: [
                                       jsx(ScrollArea, {
+                                        className: 'hermes-scroll-cap',
                                         style: { maxHeight: 200 },
                                         children: jsx('div', {
                                           className: 'grid gap-1',
