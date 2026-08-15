@@ -13,6 +13,7 @@ function loadCanonical({ openSession, request, meta = {} }) {
     host: { openSession, request },
     saveBotMeta: (name, patch) => saved.push({ name, patch }),
     $botMeta: { get: () => meta },
+    $hideBotChats: { get: () => true },
     window: { setTimeout: callback => callback() }
   }
   const section = source
