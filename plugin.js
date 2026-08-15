@@ -137,7 +137,8 @@ const $selectedBot = atom('default')
 const $botMeta = atom({})
 
 function saveBotMeta(name, patch) {
-  const next = { ...$botMeta.get(), [name]: { ...($botMeta.get()[name] || {}), ...patch } }
+  const prevMeta = $botMeta.get()[name] || {}
+  const next = { ...$botMeta.get(), [name]: { ...prevMeta, ...patch } }
   $botMeta.set(next)
 
   // Local plugin storage: instant, and the fallback for older gateways.
@@ -164,8 +165,12 @@ function saveBotMeta(name, patch) {
   }
 
   // Avatar image → profile asset store (feature-detected; local storage
-  // remains the fallback rendering source on older gateways).
-  if ('image' in patch) {
+  // remains the fallback rendering source on older gateways) — but only when
+  // the image actually CHANGED. Every Edit Profile save sends the image key
+  // (changed or not); a no-op `clear` from one machine can race another
+  // machine's just-pushed avatar and wipe it server-side, and a no-op
+  // `data` push re-uploads the full data URL for nothing.
+  if ('image' in patch && patch.image !== (prevMeta.image ?? null)) {
     try {
       const req = patch.image
         ? host.request('profiles.set_asset', { name, asset: 'avatar', data: patch.image })
