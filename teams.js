@@ -240,10 +240,6 @@ export async function teamPrompt(team, profile, message, turnId, opts = {}) {
   return build(ctx.rows)
 }
 
-export function runTeamFanout() {
-  throw new Error('not implemented')
-}
-
 /**
  * saveTeams — persist the full team list to `teams-v1` (Q4: REPLACE, not merge).
  *
@@ -376,15 +372,18 @@ export async function patchTeamReply(storage, teamId, turnId, member, reply) {
  */
 export async function deleteTeam(storage, teamId) {
   if (!storage || !teamId) return
-  // Best-effort removals; tolerate a backend without a `delete` method.
+  // Best-effort removal. Prefer an explicit removal method; if the backend only
+  // exposes `set`, we cannot truly delete (a `set(k, undefined)` leaves a
+  // tombstone key in most KV/Map stores), so we fall back to a silent no-op
+  // rather than pretending the key is gone (D14: documented limitation).
   const remove = (k) => {
     if (typeof storage.delete === 'function') {
       return Promise.resolve(storage.delete(k)).catch(() => {})
     }
-    if (typeof storage.set === 'function') {
-      return Promise.resolve(storage.set(k, undefined)).catch(() => {})
+    if (typeof storage.remove === 'function') {
+      return Promise.resolve(storage.remove(k)).catch(() => {})
     }
-    return Promise.resolve()
+    return Promise.resolve() // cannot truly remove without a delete/remove method
   }
   await remove(`team-log:${teamId}`)
   // Strip the team node from team-sessions-v2.
@@ -400,6 +399,126 @@ export async function deleteTeam(storage, teamId) {
   }
 }
 
-export function assertTeamGeneration() {
-  throw new Error('not implemented')
+/**
+ * assertTeamGeneration — anti-reload-race guard (CA9 / RG7).
+ *
+ * The module holds a `currentGeneration` symbol that is bumped whenever the
+ * plugin re-registers (hot-reload of the desktop shell). Any in-flight fanout
+ * captured the generation at start; if it no longer matches, the turn was
+ * superseded and must reject rather than write stale results.
+ *
+ * @param {symbol} generation - the generation captured at fanout start
+ * @throws {Error} if generation !== currentGeneration
+ */
+let currentGeneration = TEAM_GENERATION_KEY
+export function bumpTeamGeneration() {
+  currentGeneration = Symbol('team.generation')
+  return currentGeneration
+}
+export function getCurrentGeneration() {
+  return currentGeneration
+}
+export function assertTeamGeneration(generation) {
+  if (generation !== currentGeneration) {
+    throw new Error('team generation mismatch: stale fanout aborted (reload race)')
+  }
+}
+
+/**
+ * runTeamFanout — orchestrate a team turn (CA6 / CA6b / CA6c).
+ *
+ * For each member in LEAD-FIRST order ([lead, ...others]):
+ *   1. create an isolated session via host.request('session.create', { profile,
+ *      title, source: 'tool' })  — RG6: isolated per-profile session
+ *   2. submit the prompt via host.request('prompt.submit', { session_id, ... })
+ *   3. await completion via host.onEvent('message.complete', cb) keyed on the
+ *      returned session_id, resolving the member's reply.
+ *
+ * A single TEAM_TURN_TIMEOUT_MS timer races every waiter; on expiry ALL pending
+ * waiters reject (CA6b: no hang, fail-closed) so a missing completion event can
+ * never block the UI. The generation guard (CA6c) prevents two concurrent fanouts
+ * from interleaving their per-member replies.
+ *
+ * Pure orchestration: host + storage are INJECTED (ADR-2) so this is fully
+ * unit-testable with fakes.
+ *
+ * @param {object} team - { id, lead, members[] }
+ * @param {string} message - the user's message for this turn
+ * @param {object} deps - { host: Host, storage?: Storage, generation?: symbol, turnId?: string }
+ * @returns {Promise<Record<string,string>>} map member → reply
+ */
+export async function runTeamFanout(team, message, deps = {}) {
+  const { host, storage, generation } = deps || {}
+  if (!host || typeof host.request !== 'function' || typeof host.onEvent !== 'function') {
+    throw new Error('runTeamFanout requires an injected host with request + onEvent')
+  }
+  // CA6c: reject stale turns (reload race).
+  if (generation !== undefined) assertTeamGeneration(generation)
+
+  const members = Array.isArray(team && team.members) ? team.members.slice() : []
+  const lead = team && team.lead
+  // CA6: lead-first ordering.
+  const ordered = lead && members.includes(lead)
+    ? [lead, ...members.filter((m) => m !== lead)]
+    : members.slice()
+
+  const replies = {}
+  const pending = new Map() // session_id → { member, resolve, reject }
+
+  const onComplete = (ev) => {
+    if (!ev || !ev.session_id) return
+    const waiter = pending.get(ev.session_id)
+    if (!waiter) return
+    pending.delete(ev.session_id)
+    waiter.resolve(ev.content != null ? String(ev.content) : '')
+  }
+  const off = host.onEvent('message.complete', onComplete)
+
+  // CA6b: fail-closed timeout — reject all waiters, never hang.
+  let timeoutId
+  const timeoutMs = (deps && deps.timeoutMs) || TEAM_TURN_TIMEOUT_MS
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`team turn timed out after ${timeoutMs}ms (CA6b)`))
+    }, timeoutMs)
+  })
+
+  // Resolve when every submitted member has either completed or the timeout fired.
+  const allSettled = () => {
+    const waiters = [...pending.values()].map((w) => w.promise)
+    if (waiters.length === 0) return Promise.resolve()
+    return Promise.all(waiters)
+  }
+
+  try {
+    // Fire requests lead-first; completion resolves each waiter via onComplete.
+    for (const member of ordered) {
+      const created = await host.request('session.create', {
+        profile: member,
+        title: `Team ${team && team.id} · ${member}`,
+        source: 'tool'
+      })
+      const sessionId = created && created.session_id
+      if (!sessionId) {
+        replies[member] = '' // cannot correlate completion
+        continue
+      }
+      const waiter = new Promise((resolve, reject) => {
+        pending.set(sessionId, { member, resolve, reject, promise: null })
+      })
+      pending.get(sessionId).promise = waiter
+      waiter.then((content) => { replies[member] = content }).catch(() => { replies[member] = '' })
+      await host.request('prompt.submit', { session_id: sessionId, message })
+    }
+    // Wait for all completions, or the timeout (which rejects this race).
+    await Promise.race([allSettled(), timeout])
+    return replies
+  } catch (err) {
+    // CA6b: on timeout, abort — reject any still-pending waiters so nothing hangs.
+    for (const w of pending.values()) w.reject(err)
+    throw err
+  } finally {
+    if (typeof off === 'function') off()
+    if (timeoutId) clearTimeout(timeoutId)
+  }
 }

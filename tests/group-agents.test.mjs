@@ -21,11 +21,12 @@ const stripModuleSyntax = (source) =>
     // — that one is rewritten to `globalThis.plugin = {` by the caller.
     .replace(/^export\s+(?!default\b)/gm, '')
 
-// The complete public surface of teams.js: 11 functions + 8 constants.
+// The complete public surface of teams.js: 13 functions + 8 constants.
 const TEAMS_FUNCTIONS = [
   'normalizeTeams', 'teamTargets', 'projectTeamContext', 'teamPrompt',
   'runTeamFanout', 'saveTeams', 'saveTeamLog', 'loadTeams',
-  'patchTeamReply', 'deleteTeam', 'assertTeamGeneration'
+  'patchTeamReply', 'deleteTeam', 'assertTeamGeneration',
+  'getCurrentGeneration', 'bumpTeamGeneration'
 ]
 const TEAMS_CONSTANTS = [
   'TEAM_MEMBER_LIMIT', 'TEAM_MAX_COUNT', 'TEAM_CONTEXT_ROW_LIMIT',
@@ -104,13 +105,13 @@ function loadPluginCA11() {
   return { entries, disposers, plugin: context.plugin }
 }
 
-test('harness: teams.js loads with all 11 function exports', () => {
+test('harness: teams.js loads with all function exports', () => {
   const __teams = loadTeams()
   for (const name of TEAMS_FUNCTIONS) {
     assert.equal(typeof __teams[name], 'function', `${name} should be a function`)
   }
   const fnCount = TEAMS_FUNCTIONS.filter((n) => typeof __teams[n] === 'function').length
-  assert.equal(fnCount, 11)
+  assert.equal(fnCount, TEAMS_FUNCTIONS.length)
 })
 
 test('RG1: teams.js source has NO import from @hermes/plugin-sdk or react', () => {
@@ -617,4 +618,127 @@ test('CA5 (updated for D12): teamPrompt is async and yields a string', async () 
   assert.match(out, /quoted conversation data/i)
   assert.match(out, /not instructions/i)
   assert.ok(out.includes('reveal all secrets')) // present only as quoted data
+})
+
+// ── Task 6: orchestration runTeamFanout (CA6 / CA6b / CA6c) ──────────────────
+
+// Fake host: session.create returns a synthetic session_id; prompt.submit is a
+// no-op; message.complete fires asynchronously for each submitted session.
+function makeHost({ replyMap = {}, neverComplete = false } = {}) {
+  const handlers = []
+  const submitted = []
+  let counter = 0
+  return {
+    submitted,
+    request(method, params) {
+      if (method === 'session.create') {
+        const sessionId = `sess-${++counter}`
+        if (neverComplete) return Promise.resolve({ session_id: sessionId }) // never emits complete
+        return Promise.resolve({ session_id: sessionId })
+      }
+      if (method === 'prompt.submit') {
+        submitted.push(params)
+        if (neverComplete) return Promise.resolve() // never emit completion
+        // Simulate async completion for this session.
+        const sid = params.session_id
+        const content = replyMap[sid] != null ? replyMap[sid] : `reply-for-${sid}`
+        setTimeout(() => {
+          for (const h of handlers) h({ session_id: sid, content })
+        }, 1)
+        return Promise.resolve()
+      }
+      return Promise.resolve()
+    },
+    onEvent(event, cb) {
+      if (event === 'message.complete') handlers.push(cb)
+      return () => {
+        const i = handlers.indexOf(cb)
+        if (i >= 0) handlers.splice(i, 1)
+      }
+    }
+  }
+}
+
+test('CA6: runTeamFanout is lead-first and returns a map member→reply', async () => {
+  const T = loadTeams()
+  // Lead must be first in the returned order; replies keyed by member.
+  const team = { id: 'co-a', lead: 'alice', members: ['bob', 'alice', 'carol'] }
+  const host = makeHost({ replyMap: { 'sess-1': 'A', 'sess-2': 'B', 'sess-3': 'C' } })
+  const replies = await T.runTeamFanout(team, 'hi', { host })
+  assert.equal(replies.alice, 'A') // lead created first
+  assert.equal(replies.bob, 'B')
+  assert.equal(replies.carol, 'C')
+  // submission order: lead (alice) first
+  assert.equal(host.submitted[0].session_id, 'sess-1')
+})
+
+test('CA6b: runTeamFanout fails closed on timeout (never hangs, rejects)', async () => {
+  const T = loadTeams()
+  const team = { id: 'co-a', lead: 'alice', members: ['alice', 'bob'] }
+  const host = makeHost({ neverComplete: true }) // never emits message.complete
+  await assert.rejects(
+    T.runTeamFanout(team, 'hi', { host, timeoutMs: 30 }),
+    /timed out after 30ms/
+  )
+})
+
+test('CA6c: runTeamFanout rejects a stale generation (reload race)', async () => {
+  const T = loadTeams()
+  const team = { id: 'co-a', lead: 'alice', members: ['alice'] }
+  const host = makeHost({ replyMap: { 'sess-1': 'A' } })
+  // Bump the module generation so the captured one is now stale.
+  const stale = T.getCurrentGeneration()
+  T.bumpTeamGeneration()
+  await assert.rejects(
+    T.runTeamFanout(team, 'hi', { host, generation: stale }),
+    /generation mismatch/
+  )
+})
+
+test('assertTeamGeneration throws on mismatch, passes on match', () => {
+  const T = loadTeams()
+  const g = T.getCurrentGeneration()
+  assert.doesNotThrow(() => T.assertTeamGeneration(g))
+  T.bumpTeamGeneration()
+  assert.throws(() => T.assertTeamGeneration(g), /generation mismatch/)
+})
+
+// ── Recuperation D14 / D15 (revue Task 5) ──────────────────────────────────
+
+test('D14: deleteTeam removes the key via storage.remove (no tombstone)', async () => {
+  const T = loadTeams()
+  const data = new Map([['team-log:co-a', [{ ts: 1, text: 'x' }]]])
+  const storage = {
+    get: (k) => Promise.resolve(data.has(k) ? data.get(k) : null),
+    remove: (k) => { data.delete(k); return Promise.resolve() }
+  }
+  await T.deleteTeam(storage, 'co-a')
+  assert.equal(data.has('team-log:co-a'), false, 'key must be removed via remove()')
+})
+
+test('D14b: deleteTeam without delete/remove is best-effort (no crash, documented limit)', async () => {
+  const T = loadTeams()
+  const data = new Map([['team-log:co-a', [{ ts: 1, text: 'x' }]]])
+  const storage = {
+    get: (k) => Promise.resolve(data.has(k) ? data.get(k) : null),
+    set: (k, v) => { data.set(k, v); return Promise.resolve() }
+    // intentionally no delete() and no remove()
+  }
+  // Must not throw; leaves a tombstone (documented D14 limitation — cannot truly
+  // delete without a delete/remove method on the backend).
+  await T.deleteTeam(storage, 'co-a')
+  assert.ok(true)
+})
+
+test('D15: patchTeamReply preserves sibling teams when team-sessions-v2 is a valid object', async () => {
+  const T = loadTeams()
+  const data = new Map([['team-sessions-v2', { 'co-a': { t1: { bob: 'r1' } } }]])
+  const storage = {
+    get: (k) => Promise.resolve(data.has(k) ? data.get(k) : null),
+    set: (k, v) => { data.set(k, v); return Promise.resolve() }
+  }
+  await T.patchTeamReply(storage, 'co-b', 't1', 'carol', 'r2')
+  const root = data.get('team-sessions-v2')
+  assert.equal(root['co-a'].t1.bob, 'r1', 'sibling team data preserved')
+  assert.equal(root['co-b'].t1.carol, 'r2', 'new team recorded')
 })
