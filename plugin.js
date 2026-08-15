@@ -2718,6 +2718,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   const [loaded, setLoaded] = useState(false)
   const [unsupported, setUnsupported] = useState(false)
   const [skillFilter, setSkillFilter] = useState('')
+  const [openToolset, setOpenToolset] = useState(null)
 
   if (!loaded) {
     setLoaded(true)
@@ -2836,41 +2837,45 @@ function AdvancedProfileConfig({ bot, state, setState }) {
         `Toolsets (${enabledToolsets}/${state.toolsets.length} enabled — unchecking all restores the default)`,
         jsx('div', {
           className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
-          children: jsx(ScrollArea, {
-            style: { maxHeight: 320 },
-            children: jsx('div', {
-              className: 'grid gap-1.5',
-              children: state.toolsets.map(tset =>
-                jsxs(
-                  'div',
-                  {
-                    className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
-                    children: [
-                      jsxs('label', {
-                        className: 'flex items-center gap-2 text-xs font-medium text-(--ui-text-secondary)',
-                        children: [
-                          jsx(Checkbox, {
-                            checked: !!tset.enabled,
-                            onCheckedChange: value => toggleToolset(tset.name, Boolean(value))
-                          }),
-                          jsx('span', { children: tset.name })
-                        ]
-                      }),
-                      // The REAL per-toolset config (env vars / API keys / model
-                      // picker / post-setup), scoped to THIS bot's profile, when
-                      // the desktop build exposes it. Older builds: just the toggle.
-                      ToolsetConfigPanel
-                        ? jsx('div', {
-                            className: 'mt-1.5 border-t border-(--ui-stroke-secondary) pt-1.5',
-                            children: jsx(ToolsetConfigPanel, { toolset: tset.name, profile: bot })
-                          })
-                        : null
-                    ]
-                  },
-                  tset.name
-                )
+          // Inline maxHeight — plugin Tailwind arbitrary classes are not in the packaged CSS.
+          children: jsx('div', {
+            className: 'grid gap-1.5',
+            style: { maxHeight: 360, overflowY: 'auto', overscrollBehavior: 'contain' },
+            children: state.toolsets.map(tset =>
+              jsxs(
+                'div',
+                {
+                  className: 'rounded-md border border-(--ui-stroke-secondary) p-2',
+                  children: [
+                    jsxs('div', {
+                      className: 'flex items-center gap-2 text-xs font-medium text-(--ui-text-secondary)',
+                      children: [
+                        jsx(Checkbox, {
+                          checked: !!tset.enabled,
+                          onCheckedChange: value => toggleToolset(tset.name, Boolean(value))
+                        }),
+                        jsx('button', {
+                          type: 'button',
+                          className: 'min-w-0 flex-1 truncate text-left hover:text-(--ui-text-primary)',
+                          'aria-expanded': openToolset === tset.name,
+                          onClick: () =>
+                            setOpenToolset(current => (current === tset.name ? null : tset.name)),
+                          children: tset.name
+                        })
+                      ]
+                    }),
+                    // Real per-toolset config, scoped to this bot. One panel at a time.
+                    ToolsetConfigPanel && openToolset === tset.name
+                      ? jsx('div', {
+                          className: 'mt-1.5 border-t border-(--ui-stroke-secondary) pt-1.5',
+                          children: jsx(ToolsetConfigPanel, { toolset: tset.name, profile: bot })
+                        })
+                      : null
+                  ]
+                },
+                tset.name
               )
-            })
+            )
           })
         })
       ),

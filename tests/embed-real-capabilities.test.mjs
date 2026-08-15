@@ -10,6 +10,15 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
 
+/** Edit Profile → Advanced "Toolsets (...)" labeled() control only. */
+function toolsetsSection(src) {
+  const start = src.indexOf('`Toolsets (${enabledToolsets}')
+  assert.notEqual(start, -1, 'Toolsets labeled() heading not found')
+  const end = src.indexOf("'MCP servers'", start)
+  assert.notEqual(end, -1, 'MCP servers section after Toolsets not found')
+  return src.slice(start, end)
+}
+
 test('imports the real Capabilities components from the SDK', () => {
   const importBlock = source.slice(0, source.indexOf("} from '@hermes/plugin-sdk'"))
   assert.match(importBlock, /\bMcpTab\b/)
@@ -17,9 +26,26 @@ test('imports the real Capabilities components from the SDK', () => {
 })
 
 test('AdvancedProfileConfig embeds ToolsetConfigPanel per toolset, scoped to the bot profile', () => {
-  // Rendered only when the SDK export exists (older builds: just the toggle).
-  assert.match(source, /ToolsetConfigPanel\s*\n?\s*\?\s*jsx\('div'/)
-  assert.match(source, /jsx\(ToolsetConfigPanel, \{ toolset: tset\.name, profile: bot \}\)/)
+  const section = toolsetsSection(source)
+  assert.match(section, /ToolsetConfigPanel && openToolset === tset\.name/)
+  assert.match(section, /jsx\(ToolsetConfigPanel, \{ toolset: tset\.name, profile: bot \}\)/)
+})
+
+test('Toolsets section scrolls with native overflow, not a maxHeight-only Radix ScrollArea', () => {
+  const section = toolsetsSection(source)
+  assert.match(section, /overflowY:\s*'auto'/)
+  assert.match(section, /maxHeight:\s*\d+/)
+  assert.doesNotMatch(section, /jsx\(ScrollArea/)
+  assert.doesNotMatch(section, /className: '[^']*max-h-\[/)
+})
+
+test('Toolsets accordion mounts at most one ToolsetConfigPanel (checkbox ≠ expand)', () => {
+  const section = toolsetsSection(source)
+  assert.match(source, /const \[openToolset, setOpenToolset\] = useState\(null\)/)
+  assert.match(section, /openToolset === tset\.name/)
+  assert.match(section, /['"]aria-expanded['"]:\s*openToolset === tset\.name/)
+  assert.match(section, /setOpenToolset\(/)
+  assert.match(section, /onCheckedChange: value => toggleToolset\(tset\.name, Boolean\(value\)\)/)
 })
 
 test('AdvancedProfileConfig embeds the real McpTab with a live gateway + profile, feature-detected', () => {
