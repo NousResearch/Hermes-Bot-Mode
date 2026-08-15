@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #141824;
+    --row: #1b2130;
+    --stroke: #2a3142;
+    --text: #e8ecf4;
+    --muted: #8b93a7;
+    --faint: #5b6377;
+    --accent: #8b5cf6;
+    --accent-soft: rgba(139,92,246,.14);
+    --green: #34d399;
+    --red: #f87171;
+    --amber: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    padding: 48px 56px;
+    width: 1720px;
+  }
+  .title {
+    display: flex; align-items: baseline; gap: 16px; margin-bottom: 6px;
+  }
+  .title h1 { font-size: 30px; font-weight: 700; letter-spacing: -.02em; }
+  .title .tag {
+    font-size: 12px; font-weight: 600; color: var(--accent);
+    background: var(--accent-soft); border: 1px solid rgba(139,92,246,.35);
+    padding: 3px 10px; border-radius: 999px;
+  }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  .subtitle code { color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .col-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .col-head .badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 6px; letter-spacing: .04em; text-transform: uppercase; }
+  .badge.before { background: rgba(248,113,113,.12); color: var(--red); border: 1px solid rgba(248,113,113,.3); }
+  .badge.after  { background: rgba(52,211,153,.12); color: var(--green); border: 1px solid rgba(52,211,153,.3); }
+  .col-head span { font-size: 15px; font-weight: 600; color: var(--text); }
+
+  /* ── roster rows ─────────────────────────────── */
+  .roster {
+    background: var(--panel); border: 1px solid var(--stroke);
+    border-radius: 14px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .row {
+    background: var(--row); border: 1px solid var(--stroke);
+    border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: flex-start;
+  }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 700; color: #fff;
+  }
+  .row-body { flex: 1; min-width: 0; }
+  .row-top { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .bot-name { font-size: 13.5px; font-weight: 650; }
+  .time { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .preview { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .preview.italic { font-style: italic; color: var(--accent); }
+  .session-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 10.5px; color: var(--muted);
+    background: rgba(255,255,255,.04); border: 1px solid var(--stroke);
+    padding: 2px 7px; border-radius: 5px; margin-bottom: 5px;
+    cursor: pointer;
+  }
+  .sender-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 600; color: var(--accent);
+    background: var(--accent-soft); padding: 2px 7px; border-radius: 999px;
+  }
+  .pulse-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 0 rgba(139,92,246,.55);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(139,92,246,.55); opacity: 1; }
+    50%     { box-shadow: 0 0 0 4px rgba(139,92,246,0); opacity: .4; }
+  }
+  .history {
+    margin-top: 7px; border-left: 2px solid var(--stroke); padding-left: 10px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .hist-row { display: flex; align-items: baseline; gap: 7px; font-size: 11px; }
+  .hist-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+  .hist-title { color: var(--text); }
+  .hist-time { margin-left: auto; color: var(--faint); font-size: 10px; }
+
+  /* ── callout annotations ─────────────────────── */
+  .callout {
+    position: relative; border: 1.5px dashed rgba(139,92,246,.55);
+    border-radius: 8px; background: rgba(139,92,246,.05);
+  }
+  .callout .num {
+    position: absolute; top: -11px; left: -11px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent); color: #fff; font-size: 12px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 0 3px var(--bg);
+  }
+  .legend { margin-top: 14px; display: flex; flex-direction: column; gap: 7px; }
+  .legend-item { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); }
+  .legend-num {
+    width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent); color: #fff; font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .legend-item strong { color: var(--text); font-weight: 600; }
+  .footer {
+    margin-top: 30px; display: flex; align-items: center; gap: 14px;
+    padding-top: 18px; border-top: 1px solid var(--stroke);
+    font-size: 12px; color: var(--faint);
+  }
+  .footer .pr { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+
+  <div class="title">
+    <h1>Hermes Bot Mode — Session-Aware Roster</h1>
+    <span class="tag">PR #49</span>
+  </div>
+  <div class="subtitle">
+    The Bots pane now shows <em>which chat</em> a preview belongs to and <em>who sent it</em> — built on the <code>session.list</code> RPC. No core patches, pure desktop-plugin surface.
+  </div>
+
+  <div class="columns">
+
+    <!-- BEFORE -->
+    <div>
+      <div class="col-head"><span class="badge before">Before</span><span>Rows were log lines</span></div>
+      <div class="roster">
+        <div class="row">
+          <div class="avatar" style="background:#8b5cf6">S</div>
+          <div class="row-body">
+            <div class="row-top"><span class="bot-name">scribe</span><span class="time">2m</span></div>
+            <div class="session-chip" style="color:var(--faint)">Bot Chat</div>
+            <div class="preview" style="color:var(--faint)">Message from 🤖 manager (@manager): Learn-share: skill installed in your profile</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="avatar" style="background:#f97316">R</div>
+          <div class="row-body">
+            <div class="row-top"><span class="bot-name">researcher</span><span class="time">9m</span></div>
+            <div class="session-chip" style="color:var(--faint)">Bot Chat</div>
+            <div class="preview" style="color:var(--faint)">Message from agent 'ops': vault sync OK</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="avatar" style="background:#10b981">T</div>
+          <div class="row-body">
+            <div class="row-top"><span class="bot-name">trader</span><span class="time">1h</span></div>
+            <div class="session-chip" style="color:var(--faint)">New chat</div>
+            <div class="preview" style="color:var(--faint)">No conversations yet — say hi</div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:12px;font-size:11.5px;color:var(--red);line-height:1.6">
+        ✗ Every row says “Bot Chat” — you can’t tell which thread the preview is from.<br>
+        ✗ Bot-to-bot DMs read as raw “Message from …” log prefixes.<br>
+        ✗ No way to see whether a bot is live or what it worked on recently.
+      </div>
+    </div>
+
+    <!-- AFTER -->
+    <div>
+      <div class="col-head"><span class="badge after">After</span><span>Rows read like a chat app</span></div>
+      <div class="roster">
+        <div class="row callout" style="position:relative">
+          <span class="num">1</span>
+          <div class="avatar" style="background:#8b5cf6">S</div>
+          <div class="row-body">
+            <div class="row-top">
+              <span class="pulse-dot"></span>
+              <span class="bot-name">scribe</span>
+              <span class="time">2m</span>
+            </div>
+            <div class="session-chip">▸ Learn-share: skill installed in your profile</div>
+            <div class="preview italic">Learn-share: skill installed in your profile</div>
+            <div class="history">
+              <div class="hist-row"><span class="hist-dot"></span><span class="hist-title">Learn-share: skill installed in your profile</span><span class="hist-time">now</span></div>
+              <div class="hist-row"><span class="hist-dot" style="background:var(--faint)"></span><span class="hist-title">Weekly review planning</span><span class="hist-time">3h</span></div>
+              <div class="hist-row"><span class="hist-dot" style="background:var(--faint)"></span><span class="hist-title">Inbox triage</span><span class="hist-time">1d</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="row callout" style="position:relative">
+          <span class="num">3</span>
+          <div class="avatar" style="background:#f97316">R</div>
+          <div class="row-body">
+            <div class="row-top"><span class="bot-name">researcher</span><span class="time">9m</span></div>
+            <div class="session-chip" style="margin-right:6px">▸ vault sync</div>
+            <span class="sender-badge">🤖 @ops</span>
+            <div class="preview italic" style="margin-top:5px">vault sync OK</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="avatar" style="background:#10b981">T</div>
+          <div class="row-body">
+            <div class="row-top"><span class="bot-name">trader</span><span class="time">1h</span></div>
+            <div class="session-chip">▸ Markets EOD scan</div>
+            <div class="preview">Big mover scan done — 2 flagged</div>
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <div class="legend-item"><span class="legend-num">1</span><strong>Live activity</strong> — pulsing dot when the bot wrote within the last 90s</div>
+        <div class="legend-item"><span class="legend-num">2</span><strong>Session chip</strong> — real title, or a label generated from the newest message when the title is generic; click to expand history</div>
+        <div class="legend-item"><span class="legend-num">3</span><strong>🤖 @sender badge</strong> — bot-to-bot DM attribution; previews are stripped of the delivery prefix so they read like DMs</div>
+        <div class="legend-item"><span class="legend-num">4</span><strong>Inline history</strong> — last 6 sessions, lazy-loaded via <span style="color:var(--accent)">session.list</span>, with relative timestamps and a current-chat dot</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <span class="pr">Hermes-Bot-Mode · PR #49</span>
+    <span>·</span>
+    <span>feat(roster): session-aware bot rows — live activity, DM attribution, inline history</span>
+    <span>·</span>
+    <span>12/12 tests green · no core patches</span>
+  </div>
+
+</body>
+</html>
