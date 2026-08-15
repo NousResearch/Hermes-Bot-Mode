@@ -3637,14 +3637,28 @@ function useRoutines() {
   })
 }
 
-/** Pick which cron jobs to show. A failed refresh keeps the last good list. */
-function selectRoutineJobs(data, error, lastJobs, bot) {
+/** Pick which cron jobs to show. A failed refresh keeps the last good list.
+ *  ``ownsStore`` is true when the bot's profile IS the gateway's profile —
+ *  the store being read is that bot's own. In that case untagged jobs are
+ *  the bot's cronjobs (created via CLI/cronjob tool) and belong in the pane.
+ *  When false (a bot whose profile runs its own gateway), only jobs tagged
+ *  ``[bot:<name>]`` in THIS store can be shown — the bot's real store lives
+ *  elsewhere, so an empty result is not proof of no routines (#37). */
+function selectRoutineJobs(data, error, lastJobs, bot, gatewayProfile) {
   const live = Array.isArray(data?.jobs) ? data.jobs : null
   const all = live ?? (error ? lastJobs : [])
+  const ownsStore =
+    !gatewayProfile ||
+    normalizedProfileName(bot) === normalizedProfileName(gatewayProfile)
+  const jobs = all.filter(job => {
+    const owner = routineBot(job)
+    return owner === bot || (ownsStore && owner === null)
+  })
   return {
     live,
     all,
-    jobs: all.filter(job => routineBot(job) === bot)
+    jobs,
+    ownsStore
   }
 }
 
@@ -4154,7 +4168,7 @@ function RoutinesPane() {
   const { shape, color, image } = botAppearance(bot, meta)
   const { data, error, isLoading, refetch } = useRoutines()
   const [createOpen, setCreateOpen] = useState(false)
-  const view = selectRoutineJobs(data, error, $lastJobs.get(), bot)
+  const view = selectRoutineJobs(data, error, $lastJobs.get(), bot, gatewayProfile)
   if (view.live) {
     $lastJobs.set(view.live)
   }
@@ -4236,22 +4250,41 @@ function RoutinesPane() {
               ]
             })
         : jobs.length === 0
-          ? jsxs('div', {
-              className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
-              children: [
-                jsx(Codicon, { name: 'calendar', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
-                jsx('div', {
-                  className: 'text-xs leading-5 text-(--ui-text-tertiary)',
-                  children: 'Cronjobs are recurring tasks this agent runs on a schedule.'
-                }),
-                jsx(Button, {
-                  variant: 'secondary',
-                  size: 'sm',
-                  onClick: () => setCreateOpen(true),
-                  children: 'Create Cronjob'
-                })
-              ]
-            })
+          ? view.ownsStore
+            ? jsxs('div', {
+                className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
+                children: [
+                  jsx(Codicon, { name: 'calendar', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
+                  jsx('div', {
+                    className: 'text-xs leading-5 text-(--ui-text-tertiary)',
+                    children: 'Cronjobs are recurring tasks this agent runs on a schedule.'
+                  }),
+                  jsx(Button, {
+                    variant: 'secondary',
+                    size: 'sm',
+                    onClick: () => setCreateOpen(true),
+                    children: 'Create Cronjob'
+                  })
+                ]
+              })
+            : jsxs('div', {
+                className: 'flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center',
+                children: [
+                  jsx(Codicon, { name: 'info', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
+                  jsx('div', {
+                    className: 'text-xs leading-5 text-(--ui-text-tertiary)',
+                    children:
+                      'This bot runs its own gateway, so its cronjobs live in its own store and can’t be listed here. ' +
+                      'Check them with: hermes -p ' + botHandle(bot) + ' cron list'
+                  }),
+                  jsx(Button, {
+                    variant: 'secondary',
+                    size: 'sm',
+                    onClick: () => setCreateOpen(true),
+                    children: 'Create Cronjob'
+                  })
+                ]
+              })
           : jsx(ScrollArea, {
               className: 'min-h-0 flex-1',
               children: jsx('div', {
