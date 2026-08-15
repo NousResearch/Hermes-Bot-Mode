@@ -181,9 +181,9 @@ export async function projectTeamContext(team, turnId, opts = {}) {
  * @param {string} message   - the user's message for this turn
  * @param {string} turnId    - turn identifier
  * @param {object} [opts]    - { context?: {rows,chars}, storage?: Storage }
- * @returns {string|Promise<string>} system prompt (Promise only if storage path used)
+ * @returns {Promise<string>} system prompt
  */
-export function teamPrompt(team, profile, message, turnId, opts = {}) {
+export async function teamPrompt(team, profile, message, turnId, opts = {}) {
   const o = opts || {}
   const teamId = team && team.id != null ? String(team.id) : 'unknown'
   const teamName = team && team.name != null ? String(team.name) : teamId
@@ -191,8 +191,16 @@ export function teamPrompt(team, profile, message, turnId, opts = {}) {
   const userMessage = message != null ? String(message) : ''
   const tid = turnId != null ? String(turnId) : 'n/a'
 
+  // D11: sanitize backtick runs in row text so they cannot prematurely close
+  // the SHARED_HISTORY_JSON fence. Collapse any 3+ backticks to a safe token.
+  const sanitize = (rows) =>
+    (Array.isArray(rows) ? rows : []).map((r) => {
+      if (!r || typeof r.text !== 'string') return r
+      return { ...r, text: r.text.replace(/`{3,}/g, '▁▁▁') }
+    })
+
   const build = (rows) => {
-    const json = JSON.stringify(rows)
+    const json = JSON.stringify(sanitize(rows))
     const lines = []
     lines.push(`# Team session — ${teamName} (id: ${teamId})`)
     lines.push(`Current profile: ${profileName}`)
@@ -219,40 +227,177 @@ export function teamPrompt(team, profile, message, turnId, opts = {}) {
     return lines.join('\n')
   }
 
-  // Preferred synchronous path: history supplied pre-resolved (no IO coupling).
+  // Preferred path: history supplied pre-resolved (no IO coupling).
   if (o.context && Array.isArray(o.context.rows)) {
     return build(o.context.rows)
   }
-  // No storage and no context → empty bounded history (pure, synchronous).
+  // No storage and no context → empty bounded history.
   if (!o.storage) {
     return build([])
   }
   // Async path: resolve context from storage internally, then build.
-  return projectTeamContext(team, turnId, { storage: o.storage }).then((ctx) => build(ctx.rows))
+  const ctx = await projectTeamContext(team, turnId, { storage: o.storage })
+  return build(ctx.rows)
 }
 
 export function runTeamFanout() {
   throw new Error('not implemented')
 }
 
-export function saveTeams() {
-  throw new Error('not implemented')
+/**
+ * saveTeams — persist the full team list to `teams-v1` (Q4: REPLACE, not merge).
+ *
+ * Safe against a failing backend (CA7d): a rejected `storage.set` is caught and
+ * the function resolves (optionally notifies) instead of crashing the caller.
+ * Wrapped in Promise.resolve so both sync and async storage are tolerated.
+ *
+ * @param {object} storage - injected Storage ({ get, set })
+ * @param {Array} teams - normalized Team[] (source of truth = normalizeTeams)
+ * @returns {Promise<void>}
+ */
+export async function saveTeams(storage, teams) {
+  if (!storage || typeof storage.set !== 'function') return
+  const list = Array.isArray(teams) ? teams : []
+  try {
+    await Promise.resolve(storage.set('teams-v1', list))
+  } catch {
+    // CA7d: backend fault must not crash the turn.
+    if (typeof storage.notify === 'function') {
+      storage.notify({ level: 'error', message: 'teams-v1 save failed' })
+    }
+  }
 }
 
-export function saveTeamLog() {
-  throw new Error('not implemented')
+/**
+ * saveTeamLog — append one entry to `team-log:<teamId>` (CA7/CA7b: distinct
+ * per-team key). Read-modify-write is guarded so a missing or malformed
+ * existing log degrades to [entry] rather than throwing (CA7e).
+ *
+ * @param {object} storage
+ * @param {string} teamId
+ * @param {object} entry - { ts, text, member?, role? }
+ * @returns {Promise<void>}
+ */
+export async function saveTeamLog(storage, teamId, entry) {
+  if (!storage || typeof storage.set !== 'function' || !teamId) return
+  const key = `team-log:${teamId}`
+  let existing = []
+  try {
+    const raw = await Promise.resolve(storage.get(key))
+    if (Array.isArray(raw)) existing = raw
+    else if (raw != null) existing = [] // CA7e: tolerate non-array/malformed
+  } catch {
+    existing = []
+  }
+  const next = existing.concat([entry])
+  try {
+    await Promise.resolve(storage.set(key, next))
+  } catch {
+    // CA7d: backend fault must not crash the turn.
+    if (typeof storage.notify === 'function') {
+      storage.notify({ level: 'error', message: `${key} save failed` })
+    }
+  }
 }
 
-export function loadTeams() {
-  throw new Error('not implemented')
+/**
+ * loadTeams — hydrate the team list from `teams-v1` (CA7/CA7c/CA7e).
+ *
+ * A rejecting `get` (CA7c) or malformed JSON (CA7e) yields [] rather than
+ * throwing, so a storage fault never blocks startup.
+ *
+ * @param {object} storage
+ * @returns {Promise<Array>}
+ */
+export async function loadTeams(storage) {
+  if (!storage || typeof storage.get !== 'function') return []
+  let raw
+  try {
+    raw = await Promise.resolve(storage.get('teams-v1'))
+  } catch {
+    return [] // CA7c: backend fault → empty, no crash
+  }
+  if (raw == null) return []
+  if (Array.isArray(raw)) return raw
+  // CA7e: tolerate a JSON string or other parseable shape.
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return [] // malformed JSON → empty, no throw
+    }
+  }
+  return []
 }
 
-export function patchTeamReply() {
-  throw new Error('not implemented')
+/**
+ * patchTeamReply — record a member's reply for a turn in `team-sessions-v2`.
+ * Kept simple + testable: stores { [teamId]: { [turnId]: { [member]: reply } } }.
+ *
+ * @param {object} storage
+ * @param {string} teamId
+ * @param {string} turnId
+ * @param {string} member
+ * @param {string} reply
+ * @returns {Promise<void>}
+ */
+export async function patchTeamReply(storage, teamId, turnId, member, reply) {
+  if (!storage || typeof storage.set !== 'function' || !teamId) return
+  const key = 'team-sessions-v2'
+  let root = {}
+  try {
+    const raw = await Promise.resolve(storage.get(key))
+    if (raw && typeof raw === 'object') root = raw
+  } catch {
+    root = {}
+  }
+  const teamNode = root[teamId] || {}
+  const turnNode = teamNode[turnId] || {}
+  turnNode[member] = reply
+  teamNode[turnId] = turnNode
+  root[teamId] = teamNode
+  try {
+    await Promise.resolve(storage.set(key, root))
+  } catch {
+    if (typeof storage.notify === 'function') {
+      storage.notify({ level: 'error', message: `${key} save failed` })
+    }
+  }
 }
 
-export function deleteTeam() {
-  throw new Error('not implemented')
+/**
+ * deleteTeam — remove a team's per-team storage: `team-log:<teamId>` and the
+ * team's node from `team-sessions-v2` (CA11 UI will also drop it from teams-v1).
+ *
+ * @param {object} storage
+ * @param {string} teamId
+ * @returns {Promise<void>}
+ */
+export async function deleteTeam(storage, teamId) {
+  if (!storage || !teamId) return
+  // Best-effort removals; tolerate a backend without a `delete` method.
+  const remove = (k) => {
+    if (typeof storage.delete === 'function') {
+      return Promise.resolve(storage.delete(k)).catch(() => {})
+    }
+    if (typeof storage.set === 'function') {
+      return Promise.resolve(storage.set(k, undefined)).catch(() => {})
+    }
+    return Promise.resolve()
+  }
+  await remove(`team-log:${teamId}`)
+  // Strip the team node from team-sessions-v2.
+  try {
+    const key = 'team-sessions-v2'
+    const raw = await Promise.resolve(storage.get(key))
+    if (raw && typeof raw === 'object' && raw[teamId]) {
+      delete raw[teamId]
+      await Promise.resolve(storage.set(key, raw)).catch(() => {})
+    }
+  } catch {
+    /* best-effort */
+  }
 }
 
 export function assertTeamGeneration() {
