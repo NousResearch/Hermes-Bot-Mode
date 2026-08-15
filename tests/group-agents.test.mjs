@@ -113,7 +113,7 @@ test('harness: teams.js loads with all 11 function exports', () => {
   assert.equal(fnCount, 11)
 })
 
-test('D1: teams.js source has NO import from @hermes/plugin-sdk or react (RG1)', () => {
+test('RG1: teams.js source has NO import from @hermes/plugin-sdk or react', () => {
   assert.equal(/from\s+['"]@hermes\/plugin-sdk|react/.test(teamsSource), false)
 })
 
@@ -133,6 +133,7 @@ test('CA1: valid team is normalized and kept', () => {
   )
   assert.equal(result.length, 1)
   assert.equal(result[0].lead, 'alice')
+  assert.equal(result[0].name, 'Company A') // D1: cover team.name assignment
   assert.deepEqual(result[0].members, ['alice', 'bob', 'carol'])
 })
 
@@ -186,4 +187,110 @@ test('CA2e: more than TEAM_MAX_COUNT valid teams are capped at 50', () => {
   const result = normalizeTeams(items, ['alice', 'bob'])
   assert.equal(result.length, TEAM_MAX_COUNT)
   assert.equal(result.length, 50)
+})
+
+// ── teamTargets (CA3): bounded @mention routing to team members ──────────────
+
+test('CA3a: mention of non-member → unknown, member → target', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('@bob @carol say hi', ['alice', 'bob'], ['alice', 'bob', 'carol'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: ['carol'] })
+})
+
+test('CA3b: both mentioned users are members → targets only', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('ping @alice and @bob', ['alice', 'bob', 'carol'], ['alice', 'bob', 'carol'])
+  assert.deepEqual(res, { targets: ['alice', 'bob'], unknown: [] })
+})
+
+test('CA3c: no mentions → empty result', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('no mentions here', ['alice'], ['alice'])
+  assert.deepEqual(res, { targets: [], unknown: [] })
+})
+
+test('CA3d: mentions inside inline code span are excluded', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('`@secret @admin`', ['alice'], ['alice'])
+  assert.deepEqual(res, { targets: [], unknown: [] })
+})
+
+test('CA3e: case-insensitive mention normalizes to member casing', () => {
+  const { teamTargets } = loadTeams()
+  const res = teamTargets('@BOB', ['bob'], ['bob'])
+  assert.deepEqual(res, { targets: ['bob'], unknown: [] })
+})
+
+// ── normalizeTeams boundary-positive coverage (D2) ────────────────────────────
+
+test('CA2f (D2): exactly 2 members (lower bound) is kept', () => {
+  const { normalizeTeams } = loadTeams()
+  const result = normalizeTeams(
+    [{ id: 'min', name: 'M', lead: 'alice', members: ['alice', 'bob'] }],
+    ['alice', 'bob']
+  )
+  assert.equal(result.length, 1)
+  assert.deepEqual(result[0].members, ['alice', 'bob'])
+})
+
+test('CA2g (D2): exactly 8 members (upper bound) is kept', () => {
+  const { normalizeTeams } = loadTeams()
+  const roster = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+  const result = normalizeTeams(
+    [{ id: 'max', name: 'M', lead: 'a', members: roster.slice() }],
+    roster
+  )
+  assert.equal(result.length, 1)
+  assert.equal(result[0].members.length, 8)
+})
+
+test('CA2h (D2): exactly 50 teams (cap boundary) are all kept', () => {
+  const { normalizeTeams, TEAM_MAX_COUNT } = loadTeams()
+  const items = []
+  for (let i = 0; i < 50; i++) {
+    items.push({ id: `t${i}`, name: `t${i}`, lead: 'alice', members: ['alice', 'bob'] })
+  }
+  const result = normalizeTeams(items, ['alice', 'bob'])
+  assert.equal(result.length, 50)
+  assert.equal(result.length, TEAM_MAX_COUNT)
+})
+
+// ── normalizeTeams robustness coverage (D3) ──────────────────────────────────
+
+test('CA2i (D3): team with empty id is rejected', () => {
+  const { normalizeTeams } = loadTeams()
+  const result = normalizeTeams(
+    [{ id: '', name: 'X', lead: 'alice', members: ['alice', 'bob'] }],
+    ['alice', 'bob']
+  )
+  assert.deepEqual(result, [])
+})
+
+test('CA2j (D3): non-string member entry is ignored', () => {
+  const { normalizeTeams } = loadTeams()
+  const result = normalizeTeams(
+    [{ id: 'm', name: 'M', lead: 'alice', members: ['alice', 42, 'bob'] }],
+    ['alice', 'bob']
+  )
+  assert.equal(result.length, 1)
+  assert.deepEqual(result[0].members, ['alice', 'bob'])
+})
+
+test('CA2k (D3): duplicate rosterNames tolerated', () => {
+  const { normalizeTeams } = loadTeams()
+  const result = normalizeTeams(
+    [{ id: 'm', name: 'M', lead: 'alice', members: ['alice', 'bob'] }],
+    ['alice', 'alice', 'bob']
+  )
+  assert.equal(result.length, 1)
+  assert.deepEqual(result[0].members, ['alice', 'bob'])
+})
+
+test('CA2l (D3): non-array rosterNames yields empty roster → no teams kept', () => {
+  const { normalizeTeams } = loadTeams()
+  const result = normalizeTeams(
+    [{ id: 'm', name: 'M', lead: 'alice', members: ['alice', 'bob'] }],
+    'not-an-array'
+  )
+  assert.deepEqual(result, [])
 })

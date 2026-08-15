@@ -56,8 +56,39 @@ export function normalizeTeams(items, rosterNames = []) {
   return out.length > TEAM_MAX_COUNT ? out.slice(0, TEAM_MAX_COUNT) : out
 }
 
-export function teamTargets() {
-  throw new Error('not implemented')
+export function teamTargets(text, members, roster = []) {
+  const membersList = Array.isArray(members) ? members : []
+  // Case-insensitive lookup from lowercased handle → original member casing.
+  const memberByLower = new Map()
+  for (const m of membersList) {
+    if (typeof m !== 'string') continue
+    memberByLower.set(m.toLowerCase(), m)
+  }
+  // RG4 isolation: @mentions inside fenced code blocks (```...```) or inline
+  // code spans (`...`) must NOT be routed. Strip them before extraction.
+  const cleaned = String(text == null ? '' : text)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+  const targets = []
+  const unknown = []
+  const seenTargets = new Set()
+  const seenUnknown = new Set()
+  const mentionRe = /(^|\s)@([a-z0-9][a-z0-9_-]*)/gi
+  let m
+  while ((m = mentionRe.exec(cleaned)) !== null) {
+    const name = m[2]
+    const lower = name.toLowerCase()
+    if (memberByLower.has(lower)) {
+      if (!seenTargets.has(lower)) {
+        seenTargets.add(lower)
+        targets.push(memberByLower.get(lower))
+      }
+    } else if (!seenUnknown.has(lower)) {
+      seenUnknown.add(lower)
+      unknown.push(name)
+    }
+  }
+  return { targets, unknown }
 }
 
 export function projectTeamContext() {
