@@ -33,10 +33,9 @@ test('CreateAgentDialog materializes the profile lazily and idempotently', () =>
       ? source.indexOf('function RoutinesPane(')
       : source.length
   )
-  // Idempotent creation guard.
-  assert.match(fn, /const ensureAgentCreated = async \(\) =>/)
-  assert.match(fn, /if \(createdRef\.current\) \{\s*return createdRef\.current/)
-  assert.match(fn, /createdRef\.current = slug/)
+  // Idempotent creation guard shares the in-flight creation promise.
+  assert.match(fn, /const ensureAgentCreated = \(\) =>/)
+  assert.match(fn, /singleFlight\(createdRef, async \(\) =>/)
   // submit() routes through the same helper (no duplicate profiles.create).
   assert.match(fn, /const slugCreated = await ensureAgentCreated\(\)/)
   // The MCP setup button in Create is wired to lazy creation, not disabled.

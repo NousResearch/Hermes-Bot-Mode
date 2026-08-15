@@ -2069,6 +2069,28 @@ function slugify(value) {
     .slice(0, 64)
 }
 
+/** Share one in-flight async operation across concurrent callers. Failures
+ * clear the slot so a later attempt can retry. */
+function singleFlight(ref, start) {
+  if (ref.current) {
+    return ref.current
+  }
+
+  let flight
+  try {
+    flight = Promise.resolve(start())
+  } catch (err) {
+    flight = Promise.reject(err)
+  }
+  ref.current = flight
+  flight.catch(() => {
+    if (ref.current === flight) {
+      ref.current = null
+    }
+  })
+  return flight
+}
+
 /** The agent-to-agent messaging protocol, reusable so a CUSTOM SOUL keeps
  *  the handoff protocol too — a custom SOUL used to silently drop it,
  *  breaking @mentions for customized bots (@wesleysimplicio, #16). */
@@ -3559,61 +3581,57 @@ function CreateAgentDialog({ open, onClose, roster }) {
     )
   }
 
-  // Materialize the profile exactly once. Returns the slug, or null on failure.
-  // Called by submit() and by the MCP setup buttons (so credentials can be
-  // configured mid-creation). Idempotent via createdRef.
-  const ensureAgentCreated = async () => {
-    if (createdRef.current) {
-      return createdRef.current
-    }
-    if (!valid || taken) {
-      return null
-    }
+  // Materialize the profile exactly once. The ref stores the in-flight promise,
+  // not only the finished slug, so simultaneous MCP setup / Create clicks share
+  // one profiles.create call. A failed flight clears itself for a later retry.
+  const ensureAgentCreated = () =>
+    singleFlight(createdRef, async () => {
+      if (!valid || taken) {
+        return null
+      }
 
-    const descriptionText = [title, description].filter(Boolean).join(' — ')
+      const descriptionText = [title, description].filter(Boolean).join(' — ')
 
-    await host.request('profiles.create', {
-      name: slug,
-      description: descriptionText,
-      clone_from: cloneFrom === '__none__' ? null : cloneFrom,
-      no_skills: noSkills,
-      // Shared (not copied) auth keeps ONE OAuth/token pool with the main
-      // profile, so refreshes can't invalidate each other. Older gateways
-      // ignore the param and copy — still functional, just forked.
-      share_auth: shareAuth,
-      soul: composeSoul({ name: slug, title, description, roster, customSoul: soul }),
-      ...(model.trim() && provider.trim() ? { model: model.trim(), provider: provider.trim() } : {})
+      await host.request('profiles.create', {
+        name: slug,
+        description: descriptionText,
+        clone_from: cloneFrom === '__none__' ? null : cloneFrom,
+        no_skills: noSkills,
+        // Shared (not copied) auth keeps ONE OAuth/token pool with the main
+        // profile, so refreshes can't invalidate each other. Older gateways
+        // ignore the param and copy — still functional, just forked.
+        share_auth: shareAuth,
+        soul: composeSoul({ name: slug, title, description, roster, customSoul: soul }),
+        ...(model.trim() && provider.trim() ? { model: model.trim(), provider: provider.trim() } : {})
+      })
+
+      // Apply capability picks from the Advanced tabs (best-effort; the
+      // profile exists either way and Edit Profile can finish the job).
+      try {
+        const capPayload = {}
+
+        if (dirtyCaps.skills && caps) {
+          capPayload.disabled_skills = caps.skills.filter(s => !s.enabled).map(s => s.name)
+        }
+        if (dirtyCaps.toolsets && caps) {
+          const en = caps.toolsets.filter(t => t.enabled)
+          capPayload.enabled_toolsets =
+            en.length === caps.toolsets.length || en.length === 0 ? [] : en.map(t => t.name)
+        }
+        if (dirtyCaps.mcp && caps) {
+          capPayload.enabled_mcp_servers = caps.mcp.filter(m => m.enabled).map(m => m.name)
+        }
+        if (Object.keys(capPayload).length) {
+          await host.request('profiles.configure', { name: slug, ...capPayload })
+        }
+      } catch {
+        /* capability application is best-effort */
+      }
+
+      saveBotMeta(slug, { shape, color, image, imageKind: image ? 'photo' : 'shape', title: title.trim(), created: Date.now() })
+      queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
+      return slug
     })
-
-    createdRef.current = slug
-
-    // Apply capability picks from the Advanced tabs (best-effort; the
-    // profile exists either way and Edit Profile can finish the job).
-    try {
-      const capPayload = {}
-
-      if (dirtyCaps.skills && caps) {
-        capPayload.disabled_skills = caps.skills.filter(s => !s.enabled).map(s => s.name)
-      }
-      if (dirtyCaps.toolsets && caps) {
-        const en = caps.toolsets.filter(t => t.enabled)
-        capPayload.enabled_toolsets =
-          en.length === caps.toolsets.length || en.length === 0 ? [] : en.map(t => t.name)
-      }
-      if (dirtyCaps.mcp && caps) {
-        capPayload.enabled_mcp_servers = caps.mcp.filter(m => m.enabled).map(m => m.name)
-      }
-      if (Object.keys(capPayload).length) {
-        await host.request('profiles.configure', { name: slug, ...capPayload })
-      }
-    } catch {
-      /* capability application is best-effort */
-    }
-
-    saveBotMeta(slug, { shape, color, image, imageKind: image ? 'photo' : 'shape', title: title.trim(), created: Date.now() })
-    queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
-    return slug
-  }
 
   const submit = async () => {
     if (!valid || taken || busy) {
