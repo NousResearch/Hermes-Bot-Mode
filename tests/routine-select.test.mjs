@@ -48,6 +48,18 @@ test('untagged jobs are hidden for a bot whose profile runs its own gateway (#37
   assert.equal(view.ownsStore, false)
 })
 
+test('scoped read from a separate-gateway bot owns its store (#37)', () => {
+  // On a gateway with profile-scoped cron support, archivist's OWN store is
+  // read (data.scoped=true) — untagged jobs there belong to archivist.
+  const own = [
+    { job_id: 'e', name: '[bot:archivist] Vault sweep', enabled: true },
+    { job_id: 'f', name: 'Untagged CLI job in archivist store', enabled: true }
+  ]
+  const view = selectRoutineJobs({ jobs: own, scoped: true }, null, [], 'archivist', 'default')
+  assert.deepEqual(view.jobs.map(j => j.job_id), ['e', 'f'])
+  assert.equal(view.ownsStore, true)
+})
+
 test('missing gateway profile defaults to owning the store', () => {
   const view = selectRoutineJobs({ jobs }, null, [], 'default', undefined)
   assert.equal(view.ownsStore, true)

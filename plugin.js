@@ -3606,8 +3606,20 @@ function isLegacyDelegatedRoutine(job) {
   return Boolean(routineBot(job) && typeof preview === 'string' && preview.startsWith(LEGACY_DELEGATED_ROUTINE_PREFIX))
 }
 
-async function loadRoutines() {
-  const data = await host.request('cron.manage', { action: 'list', include_disabled: true })
+async function loadRoutines(bot, gatewayProfile) {
+  // When the active bot's profile runs its OWN gateway, its cron store is a
+  // different jobs.json — read it via the profile-scoped RPC (hermes-agent
+  // #37 support). Old gateways ignore the param and keep the default store;
+  // `scoped` tells the view whether the data is really this bot's store.
+  const params = { action: 'list', include_disabled: true }
+  const scoped =
+    Boolean(bot && gatewayProfile) && normalizedProfileName(bot) !== normalizedProfileName(gatewayProfile)
+
+  if (scoped) {
+    params.profile = bot
+  }
+
+  const data = await host.request('cron.manage', params)
   const jobs = Array.isArray(data?.jobs) ? data.jobs : []
   const activeLegacyJobs = jobs.filter(
     job => isLegacyDelegatedRoutine(job) && job.enabled !== false && job.state !== 'paused'
@@ -3617,21 +3629,23 @@ async function loadRoutines() {
     activeLegacyJobs.map(job => host.request('cron.manage', { action: 'pause', name: job.job_id }))
   )
 
+  const result = scoped ? { ...data, scoped: true } : data
+
   if (!activeLegacyJobs.length) {
-    return data
+    return result
   }
 
   const pausedIds = new Set(activeLegacyJobs.map(job => job.job_id))
   return {
-    ...data,
+    ...result,
     jobs: jobs.map(job => (pausedIds.has(job.job_id) ? { ...job, enabled: false, state: 'paused' } : job))
   }
 }
 
-function useRoutines() {
+function useRoutines(bot, gatewayProfile) {
   return useQuery({
-    queryKey: ROUTINES_KEY,
-    queryFn: loadRoutines,
+    queryKey: [...ROUTINES_KEY, normalizedProfileName(bot) || 'default'],
+    queryFn: () => loadRoutines(bot, gatewayProfile),
     refetchInterval: 20000,
     staleTime: 8000
   })
@@ -3639,15 +3653,17 @@ function useRoutines() {
 
 /** Pick which cron jobs to show. A failed refresh keeps the last good list.
  *  ``ownsStore`` is true when the bot's profile IS the gateway's profile —
- *  the store being read is that bot's own. In that case untagged jobs are
- *  the bot's cronjobs (created via CLI/cronjob tool) and belong in the pane.
- *  When false (a bot whose profile runs its own gateway), only jobs tagged
- *  ``[bot:<name>]`` in THIS store can be shown — the bot's real store lives
- *  elsewhere, so an empty result is not proof of no routines (#37). */
+ *  the store being read is that bot's own — OR the read was profile-scoped
+ *  (a separate-gateway bot read via the `profile` RPC param). In those cases
+ *  untagged jobs are the bot's cronjobs (created via CLI/cronjob tool) and
+ *  belong in the pane. When false (separate-gateway bot on an OLD gateway
+ *  that ignored the scope), only jobs tagged ``[bot:<name>]`` in THIS store
+ *  can be shown — an empty result is not proof of no routines (#37). */
 function selectRoutineJobs(data, error, lastJobs, bot, gatewayProfile) {
   const live = Array.isArray(data?.jobs) ? data.jobs : null
   const all = live ?? (error ? lastJobs : [])
   const ownsStore =
+    Boolean(data?.scoped) ||
     !gatewayProfile ||
     normalizedProfileName(bot) === normalizedProfileName(gatewayProfile)
   const jobs = all.filter(job => {
@@ -4166,7 +4182,7 @@ function RoutinesPane() {
   const bot = (gatewayProfile || selected || 'default').trim() || 'default'
   const meta = useValue($botMeta)[bot]
   const { shape, color, image } = botAppearance(bot, meta)
-  const { data, error, isLoading, refetch } = useRoutines()
+  const { data, error, isLoading, refetch } = useRoutines(bot, gatewayProfile)
   const [createOpen, setCreateOpen] = useState(false)
   const view = selectRoutineJobs(data, error, $lastJobs.get(), bot, gatewayProfile)
   if (view.live) {
