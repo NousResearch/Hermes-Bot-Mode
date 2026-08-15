@@ -2972,8 +2972,11 @@ function HubSkillsSection({ forProfile, onInstalled }) {
   const [installed, setInstalled] = useState({})
   const [browseHub, setBrowseHub] = useState(false)
   const installRef = useRef(null)
+  const frameRef = useRef(null)
 
-  // Picker messages from the embedded hub page. Origin-checked; installs
+  // Picker messages from the embedded hub page. Origin- AND source-checked —
+  // only OUR frame may ask for an install (the hub origin alone would let any
+  // other window on it, e.g. an OAuth popup, trigger installs too); installs
   // route through the same install() the search fallback uses.
   useEffect(() => {
     if (!browseHub) {
@@ -2985,6 +2988,10 @@ function HubSkillsSection({ forProfile, onInstalled }) {
         return
       }
 
+      if (!frameRef.current || event.source !== frameRef.current.contentWindow) {
+        return
+      }
+
       const data = event.data
 
       if (!data || data.type !== 'hermes-skill-pick' || !data.name) {
@@ -2992,6 +2999,12 @@ function HubSkillsSection({ forProfile, onInstalled }) {
       }
 
       const target = String(data.identifier || data.name)
+
+      // Skill identifiers are slugs / owner-name paths — keep anything
+      // else out of skills.manage.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(target)) {
+        return
+      }
 
       if (installRef.current) {
         void installRef.current(target, String(data.name))
@@ -3099,6 +3112,7 @@ function HubSkillsSection({ forProfile, onInstalled }) {
                 children: jsx('iframe', {
                   src: HUB_PICKER_URL,
                   title: 'Hermes Skills Hub',
+                  ref: frameRef,
                   style: {
                     width: '133.34%',
                     height: '133.34%',
