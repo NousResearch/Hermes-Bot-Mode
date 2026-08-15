@@ -1662,6 +1662,18 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
 // so opening the tab doesn't fire dozens of 2MB fetches at once.
 const PET_FRAME_W = 192
 const PET_FRAME_H = 208
+const PET_PAGE_SIZE = 6
+
+function paginatePets(pets, page) {
+  const pageCount = Math.ceil(pets.length / PET_PAGE_SIZE)
+  const currentPage = Math.min(Math.max(page, 0), Math.max(0, pageCount - 1))
+  return {
+    pageCount,
+    currentPage,
+    visible: pets.slice(currentPage * PET_PAGE_SIZE, (currentPage + 1) * PET_PAGE_SIZE)
+  }
+}
+
 const petFrameCache = new Map()
 let petFetchActive = 0
 const petFetchQueue = []
@@ -1751,9 +1763,7 @@ function PetTab({ image, onImage }) {
     staleTime: 300000
   })
   const [query, setQuery] = useState('')
-  // Windowed rendering: the gallery is 4500+ pets — mounting an <img> per pet
-  // froze the dialog. Render `limit` at a time and grow on scroll-to-bottom.
-  const [limit, setLimit] = useState(24)
+  const [page, setPage] = useState(0)
   const pets = data?.pets ?? []
 
   if (isLoading) {
@@ -1779,15 +1789,7 @@ function PetTab({ image, onImage }) {
     const rank = pet => (pet.installed ? 0 : pet.curated ? 1 : 2)
     return rank(a) - rank(b)
   })
-  const visible = ranked.slice(0, limit)
-
-  const onScroll = event => {
-    const el = event.currentTarget
-
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120 && limit < ranked.length) {
-      setLimit(prev => Math.min(prev + 24, ranked.length))
-    }
-  }
+  const { pageCount, currentPage, visible } = paginatePets(ranked, page)
 
   return jsxs('div', {
     className: 'grid w-full gap-2',
@@ -1802,7 +1804,7 @@ function PetTab({ image, onImage }) {
         value: query,
         onChange: event => {
           setQuery(event.target.value)
-          setLimit(24)
+          setPage(0)
         }
       }),
       image && selectedSlug
@@ -1824,14 +1826,16 @@ function PetTab({ image, onImage }) {
             children: 'No pets match.'
           })
         : jsxs('div', {
-            onScroll,
-            style: { maxHeight: 220, overflowY: 'auto' },
+            // Keep a small inset so the selected tile's focus ring is never
+            // clipped at the edge of the gallery or by the dialog viewport.
+            style: { padding: 2 },
             children: [
               jsx('div', {
                 style: {
                   display: 'grid',
                   gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                  gap: '6px'
+                  gap: '6px',
+                  padding: 2
                 },
                 children: visible.map(pet =>
                   jsxs(
@@ -1868,10 +1872,33 @@ function PetTab({ image, onImage }) {
                   )
                 )
               }),
-              limit < ranked.length
-                ? jsx('div', {
-                    className: 'py-2 text-center text-[0.65rem] text-(--ui-text-quaternary)',
-                    children: `Scroll for more (${limit} of ${ranked.length})`
+              pageCount > 1
+                ? jsxs('div', {
+                    className: 'flex items-center justify-center gap-2 pt-1',
+                    children: [
+                      jsx(Button, {
+                        type: 'button',
+                        variant: 'ghost',
+                        size: 'xs',
+                        disabled: currentPage === 0,
+                        'aria-label': 'Previous pets',
+                        onClick: () => setPage(prev => Math.max(0, prev - 1)),
+                        children: 'Previous'
+                      }),
+                      jsx('span', {
+                        className: 'text-[0.65rem] text-(--ui-text-quaternary)',
+                        children: `${currentPage + 1} / ${pageCount}`
+                      }),
+                      jsx(Button, {
+                        type: 'button',
+                        variant: 'ghost',
+                        size: 'xs',
+                        disabled: currentPage === pageCount - 1,
+                        'aria-label': 'Next pets',
+                        onClick: () => setPage(prev => Math.min(pageCount - 1, prev + 1)),
+                        children: 'Next'
+                      })
+                    ]
                   })
                 : null
             ]
