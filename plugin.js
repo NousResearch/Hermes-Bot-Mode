@@ -491,7 +491,12 @@ if (typeof document !== 'undefined' && !document.getElementById('hermes-bots-ros
     '.hermes-bots-roster [data-radix-scroll-area-viewport] > div {' +
     ' display: block !important; width: 100%; min-width: 0; }' +
     '@keyframes hermes-bots-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }' +
-    '.hermes-bots-pulse { animation: hermes-bots-pulse 1.2s ease-in-out infinite; }'
+    '.hermes-bots-pulse { animation: hermes-bots-pulse 1.2s ease-in-out infinite; }' +
+    'body.hermes-bots-mode [data-slot="aui_intro"] { display: none !important; }' +
+    'body.hermes-bots-mode [data-slot="pet-overlay"],' +
+    'body.hermes-bots-mode .pet-overlay,' +
+    'body.hermes-bots-mode [data-pet-overlay] { display: none !important; }' +
+    '[data-chat-surface] img[src*="filler-bg0"] { display: none !important; }'
   document.head.appendChild(style)
 }
 
@@ -1925,6 +1930,27 @@ function botHandle(name) {
   return (name || '').trim().toLowerCase() === 'default' ? 'hermes' : name
 }
 
+/** Launch profile is the full hermes-agent (every skill, every perm).
+ *  It is not a teammate. Hide it from the Bots roster and never fan-out
+ *  to it. Staff is the mouth. */
+function isLaunchProfile(name) {
+  const n = String(name || '').trim().toLowerCase()
+  return n === 'default' || n === 'hermes'
+}
+
+function teamRoster(list) {
+  return (Array.isArray(list) ? list : []).filter(bot => !isLaunchProfile(bot.name))
+}
+
+function sameBot(a, b) {
+  const x = String(a || '').toLowerCase()
+  const y = String(b || '').toLowerCase()
+  if (!x || !y) return false
+  if (x === y) return true
+  const aliases = new Set(['hermes', 'default'])
+  return aliases.has(x) && aliases.has(y)
+}
+
 function showsHandle(name, meta) {
   const display = displayName({ name }, meta)
   return Boolean(name && display.toLowerCase() !== botHandle(name).toLowerCase())
@@ -2324,23 +2350,91 @@ function rememberPrint(sessionId, profile, role, text, visible) {
   return row
 }
 
-function replayOriginPrints() {
-  const profile = String(host.state.profile.get() || $selectedBot.get() || '').toLowerCase()
-  const sessionId = host.activeSessionId?.get?.() || null
-  if (!profile || typeof host.appendMessage !== 'function') return
-  for (const row of ($originPrints.get() || [])) {
-    if (row.profile && row.profile !== profile) continue
-    if (onScreenPrints.has(row.id)) continue
+function historyHasText(messages, text) {
+  const want = String(text || '').trim()
+  if (!want) return false
+  for (const msg of (Array.isArray(messages) ? messages : [])) {
+    const blob = String(msg?.content || msg?.text || msg?.message || '')
+    if (blob.trim() === want) return true
+  }
+  return false
+}
+
+async function persistOriginLine(sessionId, profile, role, text) {
+  const content = String(text || '').trim()
+  if (!content) return false
+  const payload = {
+    session_id: sessionId,
+    profile,
+    role,
+    content,
+    observed: true
+  }
+  const tryAppend = async () => {
+    const res = await host.request('session.append_message', payload)
+    return !!(res && res.ok !== false)
+  }
+  if (sessionId) {
     try {
-      const ok = host.appendMessage({
-        role: row.role,
-        text: row.text,
-        sessionId: row.sessionId || sessionId
-      })
-      if (ok) onScreenPrints.add(row.id)
+      if (await tryAppend()) return true
+    } catch {
+    }
+    try {
+      await host.request('session.resume', { session_id: sessionId, profile })
+      if (await tryAppend()) return true
     } catch {
     }
   }
+  return false
+}
+
+async function settleOriginPrints() {
+  const profile = String(host.state.profile.get() || $selectedBot.get() || '').toLowerCase()
+  const sessionId = host.activeSessionId?.get?.() || host.state.activeSessionId?.get?.() || null
+  if (!profile) return
+  let messages = []
+  if (sessionId) {
+    try {
+      const hist = await host.request('session.history', {
+        session_id: sessionId,
+        profile
+      })
+      messages = (hist && (hist.messages || hist.history || hist.items)) || []
+    } catch {
+    }
+  }
+  for (const row of ($originPrints.get() || [])) {
+    if (row.profile && !sameBot(row.profile, profile)) continue
+    if (historyHasText(messages, row.text)) continue
+    await persistOriginLine(sessionId, profile, row.role, row.text)
+    if (typeof host.appendMessage === 'function') {
+      try {
+        host.appendMessage({
+          role: row.role,
+          text: row.text,
+          sessionId: row.sessionId || sessionId || undefined
+        })
+      } catch {
+      }
+    }
+  }
+}
+
+let replayGen = 0
+function armReplay() {
+  replayGen += 1
+  const gen = replayGen
+  const times = [400, 1000, 2200, 4000]
+  for (const ms of times) {
+    setTimeout(() => {
+      if (gen !== replayGen) return
+      void settleOriginPrints()
+    }, ms)
+  }
+}
+
+function replayOriginPrints() {
+  void settleOriginPrints()
 }
 
 function teaserPlain(text) {
@@ -2480,13 +2574,13 @@ function isOrchestrator(name) {
 
 function classifyGroupAsk(text, roster, active) {
   const hay = String(text || '').toLowerCase()
-  if (!/\b(?:ask (?:the )?(?:group|team|everyone|others)|tell (?:the )?(?:group|team|everyone)|check(?: in)? with (?:the )?(?:group|team|everyone)|how are (?:you )?(?:both|all)|how is everyone)\b/.test(hay)) {
+  if (!/(?:ask (?:the )?(?:group|team|everyone|others)|tell (?:the )?(?:group|team|everyone)|check(?: in)? with (?:the )?(?:group|team|everyone)|how(?:'?s| is| are) (?:the )?(?:group|team|everyone)|hows the group|group doing|ping (?:the )?(?:group|team)|how are (?:you )?(?:both|all)|how is everyone)/.test(hay)) {
     return []
   }
   const self = String(active || '').toLowerCase()
   return (Array.isArray(roster) ? roster : [])
     .map(bot => String(bot.name || '').toLowerCase())
-    .filter(name => name && name !== self)
+    .filter(name => name && !sameBot(name, self) && !isLaunchProfile(name))
 }
 
 function parseBareLeadMention(text, names, active) {
@@ -2549,13 +2643,6 @@ function HandoffStrip() {
       return jsxs('div', {
         className: 'grid gap-2',
         children: [
-          jsx('div', {
-            className: 'flex justify-end',
-            children: jsx('div', {
-              className: 'max-w-[85%] rounded-2xl bg-(--ui-fill-secondary) px-3 py-2 text-[0.92rem] leading-relaxed',
-              children: row.ask
-            })
-          }),
           jsxs('div', {
             className: 'flex items-start gap-2',
             children: [
@@ -5246,7 +5333,7 @@ function BotsPane() {
   // roster the user already had — mixed local+cloud gateways and remotes
   // waking from sleep fail transiently. Render the last good snapshot with
   // a notice; the full error card is reserved for "never had a roster".
-  const live = Array.isArray(data?.profiles) ? data.profiles : null
+  const live = Array.isArray(data?.profiles) ? teamRoster(data.profiles) : null
   const source = live ?? (error ? $lastRoster.get() : [])
   const roster = source.slice().sort((a, b) => {
     const pa = isPinned(a) ? 1 : 0
@@ -5265,6 +5352,19 @@ function BotsPane() {
     mergeServerMeta(live)
     pullServerAvatars(live)
     trackInboundActivity(live)
+    const current = String(host.state.profile.get() || '').toLowerCase()
+    if (isLaunchProfile(current)) {
+      const staff = live.find(b => String(b.name || '').toLowerCase() === 'staff')
+      if (staff) {
+        $selectedBot.set('staff')
+        const sid = ($botMeta.get() || {}).staff?.chat
+        if (sid && typeof host.openSession === 'function') {
+          void host.openSession(sid, { profile: 'staff' })
+        } else if (typeof host.newChat === 'function') {
+          host.newChat('staff')
+        }
+      }
+    }
   }
 
   const staleNotice = error && !live && roster.length
@@ -5471,7 +5571,7 @@ export default {
           if (Array.isArray(value) && value.length) {
             $originPrints.set(value.slice(-40))
             onScreenPrints.clear()
-            setTimeout(replayOriginPrints, 80)
+            armReplay()
           }
         })
         .catch(() => undefined)
@@ -5498,8 +5598,7 @@ export default {
         $selectedBot.set(profile)
       }
       onScreenPrints.clear()
-      setTimeout(replayOriginPrints, 80)
-      setTimeout(replayOriginPrints, 400)
+      armReplay()
     })
 
     ctx.register({
@@ -5634,12 +5733,12 @@ export default {
           let names = []
           try {
             const res = await host.request('profiles.list', { include_sessions: false })
-            names = (res?.profiles ?? []).map(p => String(p.name || '').toLowerCase()).filter(Boolean)
+            names = (res?.profiles ?? []).map(p => String(p.name || '').toLowerCase()).filter(n => n && !isLaunchProfile(n))
           } catch {
             names = []
           }
           if (!names.length) {
-            names = ($lastRoster.get() || []).map(p => String(p.name || '').toLowerCase()).filter(Boolean)
+            names = ($lastRoster.get() || []).map(p => String(p.name || '').toLowerCase()).filter(n => n && !isLaunchProfile(n))
           }
 
           const active = (host.state.profile.get() || $selectedBot.get() || 'default').toLowerCase()
