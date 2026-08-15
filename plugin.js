@@ -4546,7 +4546,7 @@ export default {
           if (slashNew) {
             const activeBot = $selectedBot.get()
             const meta = activeBot ? $botMeta.get()[activeBot] : null
-            const pinnedId = meta?.chat_pin || null
+            const pinnedId = meta?.chat || meta?.chat_pin || null
             const currentId = host.activeSessionId?.get?.() ?? null
 
             if (activeBot && pinnedId && currentId && String(currentId) === String(pinnedId)) {
