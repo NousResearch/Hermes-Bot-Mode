@@ -161,9 +161,27 @@ const $botSessionsWorkspace = atom(null)
 const $botSelectedSessions = atom({})
 const $sessionsGatewayGeneration = atom(0)
 
+/** Group-chat rooms: { [group]: { log: [{from:{kind,name},text,at}], watermarks:{[member]:idx}, epoch, running } }.
+ *  Log + watermarks persist via plugin storage; epoch/running are runtime-only. */
+const $groupChats = atom({})
+/** Group whose room view is open in the Bots pane (secondary navigation,
+ *  same pattern as $botSessionsWorkspace). */
+const $groupChatWorkspace = atom(null)
+/** Groups whose latest room activity mentions @user — the needs-you badge. */
+const $groupNeedsYou = atom({})
+
 function handleSessionsGatewayTransition() {
   $sessionsGatewayGeneration.set($sessionsGatewayGeneration.get() + 1)
   $botSelectedSessions.set({})
+  // A gateway swap invalidates any in-flight room drive: bump every room's
+  // epoch so running loops bail at their next member boundary.
+  const rooms = { ...$groupChats.get() }
+
+  for (const name of Object.keys(rooms)) {
+    rooms[name] = { ...rooms[name], epoch: (rooms[name].epoch || 0) + 1, running: false }
+  }
+
+  $groupChats.set(rooms)
 }
 
 /** Per-bot appearance + display meta, persisted via ctx.storage:
@@ -2202,6 +2220,354 @@ function knownGroups(metaByName) {
   }
 
   return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+// ── group chats: bounded round-robin coordination over a shared room log ─────
+//
+// Behavioral model (clean-room): a group conversation is ONE ordered room log
+// owned by the plugin. A user send triggers at most GROUP_CHAT_MAX_ROUNDS
+// serial round-robin rounds over the member roster — never parallel, no LLM
+// router. Who speaks each round is a deterministic @mention parse since the
+// last user message (mentioned members only, else everyone); whether a member
+// actually speaks is its own turn's choice — replying with exactly "(pass)"
+// (or nothing, or failing) is silence. Hard caps end every turn; a round in
+// which everyone passed means the conversation settled. Each member runs its
+// turn in its OWN persistent per-group Hermes session and is fed only the
+// room messages that are NEW since it last saw the room.
+
+const GROUP_CHAT_MAX_ROUNDS = 3
+const GROUP_CHAT_MAX_MESSAGES = 10
+const GROUP_CHAT_HISTORY_LIMIT = 24
+const GROUP_CHAT_MAX_MEMBERS = 6
+
+/** "(pass)" (loosely: pass / (pass) / pass.) or empty = the member stayed silent. */
+function isGroupPassText(text) {
+  const trimmed = String(text || '').trim()
+
+  if (!trimmed) {
+    return true
+  }
+
+  return /^\(?\s*pass\s*\)?\.?$/i.test(trimmed)
+}
+
+/** Deterministic @mention parse. Handles @name, @"two words" via display
+ *  titles, and @everyone/@all. Names match case-insensitively against member
+ *  profile names, display titles, and collapsed no-space forms. */
+function parseGroupChatMentions(text, members) {
+  const source = String(text || '')
+  const mentioned = new Set()
+  let everyone = false
+  const handles = new Map()
+
+  for (const member of members) {
+    const title = String(member.title || '').trim()
+    const forms = new Set([
+      member.name.toLowerCase(),
+      member.name.toLowerCase().replace(/[\s_-]+/g, ''),
+      ...(title
+        ? [title.toLowerCase(), title.toLowerCase().replace(/[\s_-]+/g, ''), title.split(/\s+/)[0].toLowerCase()]
+        : [])
+    ])
+
+    for (const form of forms) {
+      if (form) {
+        handles.set(form, member.name)
+      }
+    }
+  }
+
+  for (const match of source.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)) {
+    const handle = match[1].toLowerCase()
+
+    if (handle === 'everyone' || handle === 'all') {
+      everyone = true
+      continue
+    }
+
+    if (handle === 'user') {
+      continue
+    }
+
+    const resolved = handles.get(handle) || handles.get(handle.replace(/[._-]+/g, ''))
+
+    if (resolved) {
+      mentioned.add(resolved)
+    }
+  }
+
+  return { everyone, mentioned }
+}
+
+/** Members that should take a turn this round: everyone when no member is
+ *  @-mentioned in messages since the last user entry (or @everyone appears),
+ *  otherwise only the mentioned members. Recomputed every round so a member
+ *  pulled in mid-conversation joins the next round. */
+function resolveGroupResponders(log, members) {
+  let sinceLastUser = []
+
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].from.kind === 'user') {
+      sinceLastUser = log.slice(i)
+      break
+    }
+  }
+
+  const mentioned = new Set()
+  let everyone = false
+
+  for (const entry of sinceLastUser) {
+    const parsed = parseGroupChatMentions(entry.text, members)
+
+    if (parsed.everyone) {
+      everyone = true
+    }
+
+    for (const name of parsed.mentioned) {
+      mentioned.add(name)
+    }
+  }
+
+  if (everyone || mentioned.size === 0) {
+    return members
+  }
+
+  return members.filter(member => mentioned.has(member.name))
+}
+
+/** Rotate the roster so a different member leads each round. */
+function rotateGroupSpeakers(members, round) {
+  if (members.length < 2) {
+    return members
+  }
+
+  const shift = round % members.length
+
+  return [...members.slice(shift), ...members.slice(0, shift)]
+}
+
+/** Room-log line as a member sees it: `Name (user): …` / `Name: …` /
+ *  `Name (you): …`. */
+function formatGroupChatLine(entry, viewerName) {
+  if (entry.from.kind === 'user') {
+    return `${entry.from.name || 'User'} (user): ${entry.text}`
+  }
+
+  const suffix = entry.from.name === viewerName ? ' (you)' : ''
+
+  return `${entry.from.name}${suffix}: ${entry.text}`
+}
+
+/** The full per-turn payload for one member: participation rules + the room
+ *  delta. Rules travel in the turn payload (not SOUL) so every existing bot
+ *  can join a group chat without a profile migration. */
+function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
+  const peers = members.filter(m => m.name !== viewer.name)
+  const peerNames = peers.map(m => (m.title ? `${m.title} (@${m.name})` : `@${m.name}`)).join(', ')
+
+  return [
+    `[Group chat: "${groupName}"] You are @${viewer.name}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
+    '',
+    'New messages in the room since your last turn (oldest first):',
+    ...deltaLines.map(line => `  ${line}`),
+    '',
+    'Rules for this room:',
+    '- Reply with ONE short conversational message (1-3 sentences) ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result.',
+    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
+    '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
+    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+  ].join('\n')
+}
+
+/** Trim a room log + its watermarks to the retained window, keeping
+ *  watermark indices consistent with the trimmed array. */
+function trimGroupChatLog(log, watermarks, limit = GROUP_CHAT_HISTORY_LIMIT * 4) {
+  if (log.length <= limit) {
+    return { log, watermarks }
+  }
+
+  const drop = log.length - limit
+  const trimmed = {}
+
+  for (const [name, index] of Object.entries(watermarks || {})) {
+    trimmed[name] = Math.max(0, index - drop)
+  }
+
+  return { log: log.slice(drop), watermarks: trimmed }
+}
+
+/** Mutate one group's room state through the atom + persist the durable part. */
+function updateGroupChat(group, mutate) {
+  const all = { ...$groupChats.get() }
+  const current = all[group] || { log: [], watermarks: {}, epoch: 0, running: false }
+  const next = mutate({ ...current, log: [...current.log], watermarks: { ...current.watermarks } })
+  const bounded = trimGroupChatLog(next.log, next.watermarks)
+
+  next.log = bounded.log
+  next.watermarks = bounded.watermarks
+  all[group] = next
+  $groupChats.set(all)
+
+  try {
+    const durable = {}
+
+    for (const [name, room] of Object.entries(all)) {
+      durable[name] = { log: room.log, watermarks: room.watermarks }
+    }
+
+    Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable)).catch(() => undefined)
+  } catch {
+    /* storage unavailable — room survives for this window only */
+  }
+
+  return next
+}
+
+function appendGroupChatEntry(group, from, text) {
+  const entry = { from, text: String(text).trim(), at: Date.now() }
+
+  updateGroupChat(group, room => {
+    room.log.push(entry)
+    return room
+  })
+
+  // Needs-you: a member addressing @user badges the group header.
+  if (from.kind === 'member' && /@user\b/i.test(entry.text)) {
+    $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: true })
+  }
+
+  return entry
+}
+
+/** One member turn: run the member's own per-group Hermes session with the
+ *  room delta as the prompt, capture the reply verbatim. cli.exec argv form —
+ *  no shell string composition, so hostile titles/names can't inject. */
+async function runGroupChatMemberTurn(group, member, prompt) {
+  const result = await host.request('cli.exec', {
+    argv: ['-p', member.name, 'chat', '--in', '~', '-c', `Group: ${group}`, '-Q', '-q', prompt]
+  })
+
+  if (result?.blocked || result?.code !== 0) {
+    return null
+  }
+
+  return String(result?.output || '').trim()
+}
+
+/** Drive one bounded round-robin room turn. Serial — one member at a time.
+ *  A newer user send bumps the room epoch; this loop notices at the next
+ *  member boundary, bails, and the newest send's own loop takes over. */
+async function runGroupChatRounds(group, members) {
+  const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
+  const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
+  let posted = 0
+
+  try {
+    for (let round = 0; round < GROUP_CHAT_MAX_ROUNDS; round++) {
+      const roomLog = ($groupChats.get()[group] || {}).log || []
+      const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
+      let spokeThisRound = 0
+
+      for (const member of responders) {
+        if (!isCurrent() || posted >= GROUP_CHAT_MAX_MESSAGES) {
+          return
+        }
+
+        const room = $groupChats.get()[group] || { log: [], watermarks: {} }
+        const seen = room.watermarks[member.name] || 0
+        const delta = room.log.slice(seen)
+
+        if (!delta.length) {
+          continue
+        }
+
+        const prompt = buildGroupChatTurnPrompt({
+          groupName: group,
+          members,
+          viewer: member,
+          deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name))
+        })
+
+        let reply = null
+
+        try {
+          reply = await runGroupChatMemberTurn(group, member, prompt)
+        } catch {
+          reply = null // a failed turn is a pass, never a room error
+        }
+
+        // The member has now seen everything up to the pre-reply log length.
+        updateGroupChat(group, r => {
+          r.watermarks[member.name] = r.log.length
+          return r
+        })
+
+        if (reply !== null && !isGroupPassText(reply)) {
+          appendGroupChatEntry(group, { kind: 'member', name: member.name }, reply)
+          // Its own message counts as seen too.
+          updateGroupChat(group, r => {
+            r.watermarks[member.name] = r.log.length
+            return r
+          })
+          posted += 1
+          spokeThisRound += 1
+        }
+      }
+
+      if (spokeThisRound === 0) {
+        return // everyone passed — the conversation settled
+      }
+    }
+  } finally {
+    if (isCurrent()) {
+      updateGroupChat(group, r => {
+        r.running = false
+        return r
+      })
+    }
+  }
+}
+
+/** User send into a group room: append, bump epoch (supersedes any running
+ *  loop at its next member boundary), and start the room turn unless one is
+ *  already running under the new epoch semantics. */
+function sendToGroupChat(group, members, text) {
+  const trimmed = String(text || '').trim()
+
+  if (!trimmed || !members.length) {
+    return
+  }
+
+  $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: false })
+  appendGroupChatEntry(group, { kind: 'user', name: 'You' }, trimmed)
+
+  const wasRunning = ($groupChats.get()[group] || {}).running === true
+
+  updateGroupChat(group, room => {
+    room.epoch = (room.epoch || 0) + 1
+    room.running = true
+    return room
+  })
+
+  if (!wasRunning) {
+    void runGroupChatRounds(group, members).catch(() => {
+      updateGroupChat(group, r => {
+        r.running = false
+        return r
+      })
+    })
+  } else {
+    // A loop is live; it bails at its next boundary. Chain the fresh loop
+    // after a short settle so exactly one drive owns the room.
+    setTimeout(() => {
+      void runGroupChatRounds(group, members).catch(() => {
+        updateGroupChat(group, r => {
+          r.running = false
+          return r
+        })
+      })
+    }, 250)
+  }
 }
 
 /** Share one in-flight async operation across concurrent callers. Failures
@@ -5304,6 +5670,128 @@ function GroupDialog({ bot, onClose }) {
   })
 }
 
+/** Merged room view for one group: shared timeline with per-member
+ *  attribution, a composer that drives the round-robin, and a working
+ *  indicator while member turns run. */
+function GroupChatWorkspace({ group, members }) {
+  const rooms = useValue($groupChats)
+  const allMeta = useValue($botMeta)
+  const room = rooms[group] || { log: [], running: false }
+  const [draft, setDraft] = useState('')
+
+  const header = jsxs('div', {
+    className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
+    children: [
+      jsx(Button, {
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => $groupChatWorkspace.set(null),
+        children: 'Back'
+      }),
+      jsx('div', {
+        className: 'min-w-0 flex-1 truncate text-sm font-semibold',
+        children: `${group} — group chat`
+      }),
+      jsx('span', {
+        className: 'shrink-0 text-[0.65rem] text-(--ui-text-quaternary)',
+        children: `${members.length} bots`
+      })
+    ]
+  })
+
+  const submit = () => {
+    const text = draft.trim()
+
+    if (!text) {
+      return
+    }
+
+    setDraft('')
+    sendToGroupChat(group, members.map(b => ({ name: b.name, title: allMeta[b.name]?.title || '' })), text)
+  }
+
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    children: [
+      header,
+      jsx(ScrollArea, {
+        className: 'min-h-0 flex-1',
+        children: jsxs('div', {
+          className: 'grid gap-1.5 px-2.5 pb-2',
+          children: [
+            ...(room.log.length
+              ? room.log.map((entry, index) => {
+                  const isUser = entry.from.kind === 'user'
+                  const meta = isUser ? null : allMeta[entry.from.name]
+                  const label = isUser
+                    ? 'You'
+                    : meta?.title
+                      ? `${meta.title} (@${entry.from.name})`
+                      : `@${entry.from.name}`
+
+                  return jsxs('div', {
+                    className: isUser ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5' : 'px-2 py-1',
+                    children: [
+                      jsxs('div', {
+                        className: 'flex items-baseline gap-2',
+                        children: [
+                          jsx('span', {
+                            className: isUser
+                              ? 'text-[0.7rem] font-semibold text-foreground'
+                              : 'text-[0.7rem] font-semibold text-(--ui-accent,#4f9cf9)',
+                            children: label
+                          }),
+                          jsx('span', {
+                            className: 'text-[0.625rem] text-(--ui-text-quaternary)',
+                            children: relativeTime(entry.at)
+                          })
+                        ]
+                      }),
+                      jsx('div', {
+                        className: 'whitespace-pre-wrap text-xs text-(--ui-text-secondary)',
+                        children: entry.text
+                      })
+                    ]
+                  }, `${entry.at}:${index}`)
+                })
+              : [
+                  jsx('div', {
+                    className: 'px-2 py-4 text-center text-xs text-(--ui-text-tertiary)',
+                    children: 'Say something — every bot in this group hears the room.'
+                  }, 'empty')
+                ]),
+            room.running
+              ? jsx('div', {
+                  className: 'px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)',
+                  children: 'The room is working…'
+                }, 'working')
+              : null
+          ]
+        })
+      }),
+      jsx('div', {
+        className: 'border-t border-(--ui-stroke-secondary) p-2',
+        children: jsxs('form', {
+          className: 'flex items-center gap-1.5',
+          onSubmit: event => {
+            event.preventDefault()
+            submit()
+          },
+          children: [
+            jsx(Input, {
+              'aria-label': `Message ${group}`,
+              placeholder: `Message ${group}… (@name to direct, @everyone for all)`,
+              value: draft,
+              onChange: event => setDraft(event.target.value)
+            }),
+            jsx(Button, { type: 'submit', size: 'sm', disabled: !draft.trim(), children: 'Send' })
+          ]
+        })
+      })
+    ]
+  })
+}
+
 function BotsPane() {
   const { data, error, isLoading, refetch } = useRoster()
   const gatewayState = useValue(host.state.gateway)
@@ -5317,6 +5805,8 @@ function BotsPane() {
   const hideBotChats = useValue($hideBotChats)
   const activityToasts = useValue($activityToasts)
   const sessionsWorkspaceName = useValue($botSessionsWorkspace)
+  const groupChatName = useValue($groupChatWorkspace)
+  const groupNeedsYou = useValue($groupNeedsYou)
 
   // The socket opening (boot, SSH reconnect, sleep/wake) is the signal to
   // retry immediately instead of waiting out the poll interval.
@@ -5372,6 +5862,14 @@ function BotsPane() {
 
   if (sessionsWorkspaceBot) {
     return jsx(ProfileSessionsWorkspace, { bot: sessionsWorkspaceBot })
+  }
+
+  const groupChatMembers = groupChatName
+    ? roster.filter(bot => (allMeta[bot.name]?.group || '').trim() === groupChatName)
+    : []
+
+  if (groupChatName && groupChatMembers.length) {
+    return jsx(GroupChatWorkspace, { group: groupChatName, members: groupChatMembers })
   }
 
   return jsxs('div', {
@@ -5513,7 +6011,28 @@ function BotsPane() {
                                   'shrink-0 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
                                 children: section.group
                               }),
-                              jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' })
+                              jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' }),
+                              groupNeedsYou[section.group]
+                                ? jsx('span', {
+                                    className:
+                                      'shrink-0 rounded-full bg-(--ui-accent,#4f9cf9) px-1.5 text-[0.6rem] font-semibold text-white',
+                                    title: 'A bot in this room needs your input',
+                                    children: 'needs you'
+                                  })
+                                : null,
+                              section.bots.length > 1 && section.bots.length <= GROUP_CHAT_MAX_MEMBERS
+                                ? jsx('button', {
+                                    type: 'button',
+                                    className:
+                                      'shrink-0 rounded px-1 text-[0.625rem] font-medium text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                                    title: `Open the ${section.group} group chat`,
+                                    onClick: () => {
+                                      $groupNeedsYou.set({ ...$groupNeedsYou.get(), [section.group]: false })
+                                      $groupChatWorkspace.set(section.group)
+                                    },
+                                    children: 'Open chat'
+                                  })
+                                : null
                             ]
                           }, `group:${section.group}`)
                         : null,
@@ -5645,6 +6164,33 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate persisted group-chat room logs (epoch/running are runtime-only
+    // and always reset — a loop can't survive a window reload anyway).
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-chats'))
+        .then(value => {
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const rooms = {}
+
+            for (const [name, room] of Object.entries(value)) {
+              if (room && Array.isArray(room.log)) {
+                rooms[name] = {
+                  log: room.log,
+                  watermarks: room.watermarks && typeof room.watermarks === 'object' ? room.watermarks : {},
+                  epoch: 0,
+                  running: false
+                }
+              }
+            }
+
+            $groupChats.set({ ...rooms, ...$groupChats.get() })
+          }
+        })
+        .catch(() => undefined)
+    } catch {
+      /* no storage — rooms start empty */
     }
 
     // Routines follow the chat you're in: track the live gateway profile.
