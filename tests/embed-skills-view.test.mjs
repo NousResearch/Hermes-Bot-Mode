@@ -10,9 +10,9 @@ import test from 'node:test'
 
 const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
 
-test('imports SkillsView from the SDK', () => {
-  const importBlock = source.slice(0, source.indexOf("} from '@hermes/plugin-sdk'"))
-  assert.match(importBlock, /\bSkillsView\b/)
+test('resolves SkillsView as an optional SDK namespace export', () => {
+  assert.match(source, /import \* as sdk from '@hermes\/plugin-sdk'/)
+  assert.match(source, /const SkillsView = typeof sdk === 'undefined' \? undefined : sdk\.SkillsView/)
 })
 
 test('Edit Profile renders the pinned Capabilities surface when the export exists', () => {

@@ -51,7 +51,6 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  SkillsView,
   Switch,
   Textarea,
   Tip,
@@ -62,6 +61,8 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const { McpTab, ToolsetConfigPanel } = sdk
+// Keep optional exports feature-detected; test harnesses may strip the SDK namespace.
+const SkillsView = typeof sdk === 'undefined' ? undefined : sdk.SkillsView
 
 const ID = 'hermes-bots'
 const ROSTER_KEY = [ID, 'roster']
