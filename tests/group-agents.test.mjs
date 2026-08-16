@@ -156,20 +156,24 @@ test('CA11c: plugin exposes a createTeam action that normalizes + persists (CA1/
   const stored = storage.data.get('teams-v1')
   assert.ok(Array.isArray(stored) && stored.length === 1, 'teams-v1 must hold one team')
   assert.equal(stored[0].id, 'co-a')
-  assert.deepEqual(stored[0].members, ['alice', 'bob', 'carol'])
+  // Realm-agnostic compare (plugin runs in a vm realm; deepStrictEqual would
+  // fail on differing Array prototypes even with identical content).
+  assert.equal(stored[0].members.join(','), 'alice,bob,carol')
 })
 
 test('CA11d: mention-middleware routes only to team members via teamTargets (RG4)', async () => {
-  const { entries, Teams } = loadPluginCA11()
+  const { entries, plugin } = loadPluginCA11()
   const mw = entries.find((e) => e.id === 'mention-middleware')
   assert.ok(mw && mw.data && typeof mw.data.handler === 'function')
-  // Spy on Teams.teamTargets to prove the middleware delegates routing to it.
+  // Spy on the plugin's OWN (inlined) Teams.teamTargets — the middleware
+  // delegates member routing to it (RG4). The plugin no longer imports an
+  // external Teams, so we spy on plugin.Teams.
   let called = false
-  const orig = Teams.teamTargets
-  Teams.teamTargets = (...a) => { called = true; return orig(...a) }
+  const orig = plugin.Teams.teamTargets
+  plugin.Teams.teamTargets = (...a) => { called = true; return orig(...a) }
   const draft = { text: '@bob do the thing', team: { id: 'co-a', members: ['alice', 'bob'] } }
   await mw.data.handler(draft)
-  Teams.teamTargets = orig
+  plugin.Teams.teamTargets = orig
   assert.equal(called, true, 'mention-middleware must use teamTargets for member routing')
 })
 
