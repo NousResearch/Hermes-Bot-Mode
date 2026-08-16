@@ -16,10 +16,16 @@ function load({ locale = 'en-US' } = {}) {
     return slot
   }
 
+  const calls = []
+  const stored = []
+
   const host = {
     state: { profile: { get: () => 'default', listen: () => undefined } },
     notify: () => undefined,
-    request: () => Promise.resolve({})
+    request: (method, params) => {
+      calls.push({ method, params })
+      return Promise.resolve({})
+    }
   }
 
   const context = {
@@ -37,10 +43,19 @@ function load({ locale = 'en-US' } = {}) {
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
-    .concat('\nglobalThis.__cost = { isFreeModel, botCostState, buildPricingByModel, userCurrencySymbol };')
+    .concat('\nglobalThis.__cost = { isFreeModel, botCostState, buildPricingByModel, userCurrencySymbol, saveBotMeta };')
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
 
-  return { __cost: context.__cost }
+  const register = () => {
+    const entries = []
+    context.plugin.register({
+      storage: { get: () => null, set: (key, value) => stored.push([key, value]) },
+      register: entry => entries.push(entry)
+    })
+    return entries
+  }
+
+  return { __cost: context.__cost, register, calls, stored }
 }
 
 test('unit: a :free model is classified free', () => {
@@ -120,15 +135,50 @@ test('unit: currency symbol follows the user locale, $ as fallback', () => {
   assert.equal(load({ locale: 'xx-XX' }).__cost.userCurrencySymbol(), '$')
 })
 
+test('unit: the user-declared locally-hosted flag overrides paid classification', () => {
+  const { __cost } = load()
+  // Deepseek on nous is paid... unless the user says it runs on their hardware.
+  assert.equal(
+    __cost.botCostState({ model: 'deepseek/deepseek-v4-flash-0731', provider: 'nous' }, { local: true }),
+    'local'
+  )
+  assert.equal(
+    __cost.botCostState({ model: 'Qwen3.6-35B-A3B-UD-Q8_K_XL', provider: 'custom:james-homelab' }, { local: true }),
+    'local'
+  )
+  // Without the flag, an unprovable custom endpoint stays paid (fail-closed).
+  assert.equal(
+    __cost.botCostState({ model: 'Qwen3.6-35B-A3B-UD-Q8_K_XL', provider: 'custom:james-homelab' }, {}),
+    'paid'
+  )
+})
+
+test('unit: saveBotMeta persists the locally-hosted flag (storage + server ui_meta)', () => {
+  const { __cost, register, calls, stored } = load({})
+  register()
+  __cost.saveBotMeta('multi_agent', { local: true })
+
+  const metaWrite = stored.find(([key]) => key === 'bot-meta')
+  assert.ok(metaWrite, 'bot meta is persisted to local storage')
+  assert.equal(metaWrite[1].multi_agent.local, true)
+
+  const cfg = calls.find(call => call.method === 'profiles.configure')
+  assert.ok(cfg, 'ui_meta is pushed server-side so the flag follows the profile')
+  assert.equal(cfg.params.ui_meta['hermes-bots'].local, true)
+})
+
 test('regression: roster rows render a paid/free badge wired to the classifier', () => {
   assert.match(pluginSource, /const costState = botCostState\(/)
   assert.match(pluginSource, /costBadge\(costState, bot\.model \|\| defaultModel, bot\.provider\)/)
   assert.match(pluginSource, /'🆓'/)
   assert.match(pluginSource, /userCurrencySymbol\(\)/)
+  assert.match(pluginSource, /local: Boolean\(meta\?\.local\)/)
 })
 
 test('regression: the edit-profile dialog classifies the selected model live', () => {
   assert.match(pluginSource, /function AdvancedProfileConfig/)
   assert.match(pluginSource, /state\.model\s*\? costBadge|state\.model\s*\?[\s\S]{0,80}costBadge/)
   assert.match(pluginSource, /Inherits the launch profile model/)
+  assert.match(pluginSource, /Locally hosted — runs on my own hardware \(no LLM cost\)/)
+  assert.match(pluginSource, /dirtyLocal/)
 })

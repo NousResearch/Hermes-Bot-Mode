@@ -20,7 +20,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 - **Routines pane** — recurring tasks per bot, backed by Hermes cron. "Summarize my inbox every morning" lives next to the bot that does it. Runs land in the bot's own chat history.
 - **Bot-to-bot messaging** — every bot has a persistent **Bot Chat** conversation. Bots message each other with attribution (`Message from 🤖 researcher (@researcher): ...`), and their SOUL.md teaches them the protocol, including how to reply.
 - **@mentions** — type `@researcher have a look at this` in any chat and the active bot hands the message off, waits for the reply, and reports back.
-- **Paid/free LLM badge** — each roster row shows your currency symbol (locale-aware, e.g. `$`, `£`, `€`) next to bots whose LLM costs money, and 🆓 next to bots provably running a free model (`:free` suffix, local provider, or $0 catalog pricing). Unknown models count as paid — the roster never hides a cost. Hover any badge to see the exact model + provider; OFF rows dim the badge with the row. The same badge follows the model picker in Edit Profile.
+- **Paid/free LLM badge** — each roster row shows your currency symbol (locale-aware, e.g. `$`, `£`, `€`) next to bots whose LLM costs money, and 🆓 next to bots provably running a free model (`:free` suffix, local provider, or $0 catalog pricing). Unknown models count as paid — the roster never hides a cost. Hover any badge to see the exact model + provider; OFF rows dim the badge with the row. The same badge follows the model picker in Edit Profile, where you can also check **"Locally hosted"** — for bots running on your own hardware (homelab endpoints, local GGUF servers) that no catalog can prove free — and they show 🆓 from then on.
 
 ## How it works
 
