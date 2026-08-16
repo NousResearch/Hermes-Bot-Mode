@@ -195,7 +195,8 @@ test('mention middleware still returns the draft+note, not null', async () => {
   assert.ok(result.text.includes('[@mention handoff'))
   const remembered = $originHandoffs.get() || []
   assert.equal(remembered.length, 1)
-  assert.deepEqual(remembered[0].targets, ['ops'])
+  assert.equal(remembered[0].targets.length, 1)
+  assert.equal(remembered[0].targets[0], 'ops')
   assert.equal(remembered[0].originSessionId, 'origin-session-1')
   assert.equal(remembered[0].originProfile, 'research')
 })
