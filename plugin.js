@@ -84,6 +84,22 @@ const $botUnread = atom({})
 const rosterWatermarks = new Map()
 let watermarksSeeded = false
 
+/** User pref: toast on every new bot activity. Default OFF — a busy roster
+ *  (cron runs, bot-to-bot chatter) turns the toasts into a firehose, and the
+ *  unread badge already carries the signal. Persisted via ctx.storage. */
+const $activityToasts = atom(false)
+
+/** Flip the activity-toast pref and persist it. */
+function setActivityToasts(enabled) {
+  $activityToasts.set(enabled)
+
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('activity-toasts', enabled)).catch(() => undefined)
+  } catch {
+    /* storage unavailable — pref holds for this window only */
+  }
+}
+
 /** Detect new inbound activity from a fresh roster: last_active moved past
  *  the watermark for a bot whose chat isn't on screen -> unread + toast. */
 function trackInboundActivity(roster) {
@@ -105,17 +121,22 @@ function trackInboundActivity(roster) {
       continue
     }
 
-    const meta = $botMeta.get()[bot.name]
-    const label = displayName(bot, meta)
-    const preview = (bot.last_session?.preview || '').trim()
-    const inbound = /^Message from/i.test(preview)
-
     $botUnread.set({ ...$botUnread.get(), [bot.name]: true })
-    host.notify({
-      kind: 'info',
-      title: inbound ? `\uD83E\uDD16 New message for ${label}` : `${label} has new activity`,
-      message: preview.slice(0, 140) || 'Open the chat to see it.'
-    })
+
+    // Toasts are opt-in: the unread badge is always set above, but the
+    // per-message notification fires only when the user enabled it.
+    if ($activityToasts.get()) {
+      const meta = $botMeta.get()[bot.name]
+      const label = displayName(bot, meta)
+      const preview = (bot.last_session?.preview || '').trim()
+      const inbound = /^Message from/i.test(preview)
+
+      host.notify({
+        kind: 'info',
+        title: inbound ? `\uD83E\uDD16 New message for ${label}` : `${label} has new activity`,
+        message: preview.slice(0, 140) || 'Open the chat to see it.'
+      })
+    }
   }
 }
 
@@ -5294,6 +5315,7 @@ function BotsPane() {
   const [grouping, setGrouping] = useState(null)
   const [query, setQuery] = useState('')
   const hideBotChats = useValue($hideBotChats)
+  const activityToasts = useValue($activityToasts)
   const sessionsWorkspaceName = useValue($botSessionsWorkspace)
 
   // The socket opening (boot, SSH reconnect, sleep/wake) is the signal to
@@ -5365,6 +5387,16 @@ function BotsPane() {
           jsxs('div', {
             className: 'flex items-center gap-0.5',
             children: [
+              jsx(Tip, {
+                label: activityToasts ? 'Activity toasts on — click to silence' : 'Activity toasts off — click to enable',
+                children: jsx('button', {
+                  type: 'button',
+                  className:
+                    'flex size-6 items-center justify-center rounded-md text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                  onClick: () => setActivityToasts(!activityToasts),
+                  children: jsx(Codicon, { name: activityToasts ? 'bell' : 'bell-slash' })
+                })
+              }),
               jsx(Tip, {
                 label: hideBotChats ? 'Bot Chats hidden from Sessions — click to show' : 'Bot Chats shown in Sessions — click to hide',
                 children: jsx('button', {
@@ -5600,6 +5632,19 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (hide) stays */
+    }
+
+    // Hydrate the activity-toast pref (default OFF).
+    try {
+      Promise.resolve(ctx.storage?.get?.('activity-toasts'))
+        .then(value => {
+          if (typeof value === 'boolean') {
+            $activityToasts.set(value)
+          }
+        })
+        .catch(() => undefined)
+    } catch {
+      /* no storage — default (silent) stays */
     }
 
     // Routines follow the chat you're in: track the live gateway profile.
