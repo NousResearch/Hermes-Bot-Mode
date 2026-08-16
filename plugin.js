@@ -188,6 +188,52 @@ function handleSessionsGatewayTransition() {
  *  { [botName]: { shape, color, title } } */
 const $botMeta = atom({})
 
+/** User-defined group display order (roster-level, independent of the
+ *  per-bot `group` field). Persisted via ctx.storage under 'group-order'
+ *  so it survives restarts; groups absent from the list fall back to
+ *  alphabetical order at the tail, keeping old rosters stable. */
+const $groupOrder = atom([])
+
+function saveGroupOrder(order) {
+  const next = [...order]
+  $groupOrder.set(next)
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('group-order', next)).catch(() => undefined)
+  } catch {
+    /* storage unavailable — order holds for this window only */
+  }
+}
+
+/** Move a group one slot up/down in the display order. When the group
+ *  isn't in the order yet (e.g. created before ordering existed, or just
+ *  assigned), it is first placed at its alphabetical position among the
+ *  listed groups — that adoption is always persisted. The requested
+ *  swap then happens only when the target slot is inside the list, so
+ *  boundary presses on a newly adopted group still add it to the order
+ *  without throwing it to the top/bottom. */
+function moveGroup(name, dir) {
+  const order = $groupOrder.get()
+  let idx = order.indexOf(name)
+  let next
+
+  if (idx === -1) {
+    // Adopt the group at its alphabetical position among listed groups.
+    const position = order.findIndex(g => g.localeCompare(name, undefined, { sensitivity: 'base' }) > 0)
+    idx = position === -1 ? order.length : position
+    next = [...order]
+    next.splice(idx, 0, name)
+  } else {
+    next = [...order]
+  }
+
+  const target = idx + dir
+  if (target >= 0 && target < next.length) {
+    ;[next[idx], next[target]] = [next[target], next[idx]]
+  }
+
+  saveGroupOrder(next)
+}
+
 async function saveBotMeta(name, patch) {
   const prevMeta = $botMeta.get()[name] || {}
   const next = { ...$botMeta.get(), [name]: { ...prevMeta, ...patch } }
@@ -2175,12 +2221,14 @@ function slugify(value) {
 
 /** Partition an already-sorted roster into user-defined groups. Returns
  *  [{ group: null | name, bots }] — ungrouped bots first (no separator),
- *  then each group alphabetically (case-insensitive), preserving the
- *  roster's own ordering (pin + recency) within every section. Groups are
- *  a per-bot `group` string in bot meta, so they ride the existing
- *  ui_meta sync to every machine. Empty sections are dropped, so a group
- *  disappears when its last member leaves — no group registry to manage. */
-function groupRoster(roster, metaByName) {
+ *  then each group in `groupOrder` (when supplied), with any remaining
+ *  groups sorted alphabetically (case-insensitive) after the listed ones.
+ *  Within every section the roster's own ordering (pin + recency) is
+ *  preserved. Groups are a per-bot `group` string in bot meta, so they
+ *  ride the existing ui_meta sync to every machine. Empty sections are
+ *  dropped, so a group disappears when its last member leaves — no group
+ *  registry to manage. */
+function groupRoster(roster, metaByName, groupOrder) {
   const ungrouped = []
   const byGroup = new Map()
 
@@ -2200,7 +2248,21 @@ function groupRoster(roster, metaByName) {
 
   const sections = ungrouped.length ? [{ group: null, bots: ungrouped }] : []
 
-  for (const group of [...byGroup.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))) {
+  const ranked = []
+  const rest = []
+
+  for (const group of byGroup.keys()) {
+    if (groupOrder?.includes(group)) {
+      ranked.push(group)
+    } else {
+      rest.push(group)
+    }
+  }
+
+  ranked.sort((a, b) => groupOrder.indexOf(a) - groupOrder.indexOf(b))
+  rest.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+
+  for (const group of [...ranked, ...rest]) {
     sections.push({ group, bots: byGroup.get(group) })
   }
 
@@ -5697,6 +5759,9 @@ function GroupDialog({ bot, onClose }) {
 
   const assign = group => {
     saveBotMeta(bot.name, { group: group || null })
+    if (group && !$groupOrder.get().includes(group)) {
+      saveGroupOrder([...$groupOrder.get(), group])
+    }
     host.notify({
       kind: 'info',
       message: group
@@ -5917,6 +5982,7 @@ function BotsPane() {
     }
   }, [gatewayUp, refetch])
   const allMeta = useValue($botMeta)
+  const groupOrder = useValue($groupOrder)
   // Messaging-app order: most recent activity first, where "activity" is
   // the newest of (bot created, last message in any of its sessions). A
   // freshly created bot tops the list until another bot gets a message.
@@ -6102,7 +6168,7 @@ function BotsPane() {
                   className: 'hermes-bots-roster min-h-0 flex-1',
                   children: jsx('div', {
                     className: 'grid w-full min-w-0 gap-0.5 px-1.5 pb-2',
-                    children: groupRoster(filteredRoster, allMeta).flatMap(section => [
+                    children: groupRoster(filteredRoster, allMeta, groupOrder).flatMap(section => [
                       section.group
                         ? jsxs('div', {
                             className: 'mt-2 flex items-center gap-2 px-1 pb-0.5 first:mt-0.5',
@@ -6113,6 +6179,31 @@ function BotsPane() {
                                 children: section.group
                               }),
                               jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' }),
+                              jsx('div', {
+                                className: 'flex shrink-0 items-center gap-0.5',
+                                children: [
+                                  jsx('button', {
+                                    type: 'button',
+                                    className:
+                                      'rounded px-1 text-[0.625rem] leading-none text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground disabled:opacity-30',
+                                    title: 'Move group up',
+                                    disabled: groupOrder.indexOf(section.group) === 0,
+                                    onClick: () => moveGroup(section.group, -1),
+                                    children: '↑'
+                                  }),
+                                  jsx('button', {
+                                    type: 'button',
+                                    className:
+                                      'rounded px-1 text-[0.625rem] leading-none text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground disabled:opacity-30',
+                                    title: 'Move group down',
+                                    disabled:
+                                      groupOrder.indexOf(section.group) !== -1 &&
+                                      groupOrder.indexOf(section.group) === groupOrder.length - 1,
+                                    onClick: () => moveGroup(section.group, 1),
+                                    children: '↓'
+                                  })
+                                ]
+                              }),
                               groupNeedsYou[section.group]
                                 ? jsx('span', {
                                     className:
@@ -6265,6 +6356,19 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate the persisted group display order (default: alphabetical).
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-order'))
+        .then(value => {
+          if (Array.isArray(value)) {
+            $groupOrder.set(value)
+          }
+        })
+        .catch(() => undefined)
+    } catch {
+      /* no storage — alphabetical default stays */
     }
 
     // Hydrate persisted group-chat room logs (epoch/running are runtime-only
