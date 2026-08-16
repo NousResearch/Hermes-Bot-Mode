@@ -5,8 +5,9 @@ import vm from 'node:vm'
 
 const pluginSource = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
 
-function load() {
+function load({ sdkDeleteProfile = false } = {}) {
   const requests = []
+  const sdkDeletes = []
   const invalidations = []
   const stored = []
   const values = new Map()
@@ -25,6 +26,13 @@ function load() {
         profile: { listen: () => undefined },
         gateway: { listen: () => undefined }
       },
+      ...(sdkDeleteProfile
+        ? {
+            deleteProfile: async name => {
+              sdkDeletes.push(name)
+            }
+          }
+        : {}),
       request: async (method, params) => {
         requests.push({ method, params })
         return method === 'cli.exec' ? { blocked: false, code: 0, output: 'deleted' } : { ok: true }
@@ -48,10 +56,19 @@ function load() {
     },
     register: () => undefined
   })
-  return { context, requests, invalidations, stored }
+  return { context, requests, sdkDeletes, invalidations, stored }
 }
 
-test('unit: deleting a bot uses the non-interactive profile CLI command', async () => {
+test('unit: deleting a bot prefers the SDK deleteProfile (teardown-routed REST path)', async () => {
+  const { context, requests, sdkDeletes } = load({ sdkDeleteProfile: true })
+
+  await context.__delete.deleteBot({ name: 'researcher' })
+
+  assert.deepEqual(sdkDeletes, ['researcher'])
+  assert.equal(requests.filter(r => r.method === 'cli.exec').length, 0)
+})
+
+test('unit: older desktop without host.deleteProfile falls back to the non-interactive profile CLI command', async () => {
   const { context, requests } = load()
 
   await context.__delete.deleteBot({ name: 'researcher' })

@@ -458,14 +458,28 @@ async function duplicateBot(bot, roster) {
 }
 
 /** Permanently delete a bot's Hermes profile, then remove plugin-local state
- * that would otherwise leave stale appearance/unread data behind. */
+ * that would otherwise leave stale appearance/unread data behind.
+ *
+ * Prefer the SDK's `host.deleteProfile` when this Desktop build ships it: it
+ * routes through the Electron-intercepted REST delete, which tears down the
+ * bot's pool backend FIRST and routes the next request away from it. The
+ * older `cli.exec` path bypasses that interception, so a backend that the
+ * roster's hover pre-warm just woke (right-click hovers the row!) holds the
+ * profile dir open — the CLI's rmtree races the live backend and the
+ * renderer's socket reconnect respawns it mid-delete, resurrecting the
+ * directory (hermes-agent#52279). That is the "can't delete a bot" error. */
 async function deleteBot(bot) {
-  const result = await host.request('cli.exec', {
-    argv: ['profile', 'delete', bot.name, '--yes']
-  })
+  if (typeof host.deleteProfile === 'function') {
+    await host.deleteProfile(bot.name)
+  } else {
+    // Older desktop without the SDK verb — best effort via the CLI.
+    const result = await host.request('cli.exec', {
+      argv: ['profile', 'delete', bot.name, '--yes']
+    })
 
-  if (result?.blocked || result?.code !== 0) {
-    throw new Error(result?.hint || result?.output || `Could not delete profile ${bot.name}.`)
+    if (result?.blocked || result?.code !== 0) {
+      throw new Error(result?.hint || result?.output || `Could not delete profile ${bot.name}.`)
+    }
   }
 
   const meta = { ...$botMeta.get() }
