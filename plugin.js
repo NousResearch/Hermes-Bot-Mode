@@ -68,6 +68,10 @@ const ROSTER_KEY = [ID, 'roster']
 const ROUTINES_KEY = [ID, 'routines']
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
+/** Persist injected teammate replies into the origin chat so a refresh or
+ *  tab-switch cannot wipe them. Verified host APIs only; see persistOriginLine. */
+const ORIGIN_CHAT_RETURN_PATH = true
+
 /** Captured in register() so components can reach plugin storage. */
 let pluginCtx = null
 
@@ -78,6 +82,13 @@ const $lastRoster = atom([])
  *  Fed by the roster poll's activity watermark, so it catches EVERY
  *  delivery path: RPC, CLI (bot-to-bot), cron runs, other machines. */
 const $botUnread = atom({})
+
+/** @mention handoffs waiting for a teammate preview to print back. */
+const $originHandoffs = atom([])
+
+/** Injected origin-chat lines. Live transcript dies on bot switch, so we
+ *  persist these and resettle when the origin chat is shown again. */
+const $originPrints = atom([])
 
 // last_active watermark per bot, seeded on first poll so a fresh mount
 // doesn't mark ancient history unread.
@@ -95,6 +106,11 @@ function trackInboundActivity(roster) {
     const prev = rosterWatermarks.get(bot.name) || 0
     rosterWatermarks.set(bot.name, Math.max(prev, ts))
 
+    const preview = (bot.last_session?.preview || '').trim()
+    if (ORIGIN_CHAT_RETURN_PATH && !seeding && ts > prev && preview) {
+      void applyRememberedPreview(bot.name, preview)
+    }
+
     if (seeding || ts <= prev) {
       continue
     }
@@ -107,7 +123,6 @@ function trackInboundActivity(roster) {
 
     const meta = $botMeta.get()[bot.name]
     const label = displayName(bot, meta)
-    const preview = (bot.last_session?.preview || '').trim()
     const inbound = /^Message from/i.test(preview)
 
     $botUnread.set({ ...$botUnread.get(), [bot.name]: true })
@@ -1958,6 +1973,178 @@ function showsHandle(name, meta) {
   return Boolean(name && display.toLowerCase() !== botHandle(name).toLowerCase())
 }
 
+function originSessionId() {
+  return host.activeSessionId?.get?.() || host.state?.activeSessionId?.get?.() || null
+}
+
+function rememberOriginHandoff({ originSessionId: sessionId, originProfile, targets }) {
+  if (!ORIGIN_CHAT_RETURN_PATH) {
+    return
+  }
+  const names = (targets || []).map(name => String(name).toLowerCase()).filter(Boolean)
+  if (!names.length) {
+    return
+  }
+  $originHandoffs.set(
+    [
+      ...($originHandoffs.get() || []),
+      {
+        originSessionId: sessionId || null,
+        originProfile: String(originProfile || ''),
+        targets: names,
+        seenPreviews: {}
+      }
+    ].slice(-20)
+  )
+}
+
+function rememberOriginPrint(sessionId, profile, role, text) {
+  const content = String(text || '').trim()
+  if (!content) {
+    return null
+  }
+  const row = {
+    sessionId: sessionId || null,
+    profile: String(profile || ''),
+    role: role === 'user' ? 'user' : 'assistant',
+    text: content
+  }
+  const already = ($originPrints.get() || []).some(
+    prev => prev.sessionId === row.sessionId && prev.role === row.role && prev.text === row.text
+  )
+  if (already) {
+    return null
+  }
+  $originPrints.set([...($originPrints.get() || []), row].slice(-40))
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('origin-prints', $originPrints.get())).catch(err => {
+      console.warn('[hermes-bots] origin-prints storage failed', err)
+    })
+  } catch (err) {
+    console.warn('[hermes-bots] origin-prints storage failed', err)
+  }
+  return row
+}
+
+function historyHasText(messages, text) {
+  const want = String(text || '').trim()
+  if (!want) {
+    return false
+  }
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    const blob = String(msg?.content || msg?.text || msg?.message || '')
+    if (blob.trim() === want) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Print + persist one origin-chat line. Feature-detects only
+ *  host.appendMessage and session.append_message — never guessed RPCs. */
+async function persistOriginLine(sessionId, role, text) {
+  if (!ORIGIN_CHAT_RETURN_PATH) {
+    return false
+  }
+  const content = String(text || '').trim()
+  if (!content) {
+    return false
+  }
+
+  const canAppend = typeof host.appendMessage === 'function'
+  const canRequest = typeof host.request === 'function'
+  if (!canAppend && !canRequest) {
+    return false
+  }
+
+  let failed = false
+
+  if (canAppend) {
+    try {
+      host.appendMessage({ role, text: content, sessionId })
+    } catch (err) {
+      console.warn('[hermes-bots] host.appendMessage failed', err)
+      failed = true
+    }
+  }
+
+  if (canRequest && sessionId) {
+    try {
+      await host.request('session.append_message', {
+        session_id: sessionId,
+        role,
+        content,
+        observed: true
+      })
+    } catch (err) {
+      console.warn('[hermes-bots] session.append_message failed', err)
+      failed = true
+    }
+  }
+
+  return !failed
+}
+
+async function settleOriginPrints() {
+  if (!ORIGIN_CHAT_RETURN_PATH) {
+    return
+  }
+  const sessionId = originSessionId()
+  const profile = String(host.state?.profile?.get?.() || $selectedBot.get() || '')
+  const rows = $originPrints.get() || []
+  if (!rows.length) {
+    return
+  }
+
+  let messages = null
+  if (sessionId && typeof host.request === 'function') {
+    try {
+      const hist = await host.request('session.history', { session_id: sessionId })
+      messages = hist?.messages || hist?.history || hist?.items || []
+    } catch (err) {
+      console.warn('[hermes-bots] session.history unavailable; settling without history check', err)
+      messages = null
+    }
+  }
+
+  for (const row of rows) {
+    if (row.profile && profile && String(row.profile) !== String(profile)) {
+      continue
+    }
+    if (row.sessionId && sessionId && String(row.sessionId) !== String(sessionId)) {
+      continue
+    }
+    if (messages && historyHasText(messages, row.text)) {
+      continue
+    }
+    await persistOriginLine(row.sessionId || sessionId, row.role, row.text)
+  }
+}
+
+async function applyRememberedPreview(botName, preview) {
+  if (!ORIGIN_CHAT_RETURN_PATH) {
+    return false
+  }
+  const text = String(preview || '').trim()
+  if (!text || /^Message from/i.test(text)) {
+    return false
+  }
+  const name = String(botName || '').toLowerCase()
+  const handoffs = $originHandoffs.get() || []
+  const match = handoffs.find(row => (row.targets || []).includes(name))
+  if (!match) {
+    return false
+  }
+  if (match.seenPreviews?.[name] === text) {
+    return false
+  }
+  match.seenPreviews = { ...(match.seenPreviews || {}), [name]: text }
+  $originHandoffs.set([...handoffs])
+  const line = `${botHandle(name)}: ${text}`
+  rememberOriginPrint(match.originSessionId, match.originProfile, 'assistant', line)
+  return persistOriginLine(match.originSessionId, 'assistant', line)
+}
+
 // ── canonical bot chat ───────────────────────────────────────────────────────
 // Each bot has ONE forever chat, pinned by stored-session id in bot meta
 // (meta.chat — synced server-side via ui_meta, so it follows the profile).
@@ -2069,6 +2256,9 @@ async function openBotCanonicalChat(name, pinned) {
 
   try {
     await host.openSession(id, { profile: name })
+    if (ORIGIN_CHAT_RETURN_PATH) {
+      void settleOriginPrints()
+    }
     return id
   } catch {
     // A rejected resume means the pin is unusable even if list recovery was
@@ -5075,6 +5265,9 @@ async function openProfileSession(botName, storedId, gatewayGeneration) {
     throw new Error('This Hermes Desktop version cannot open stored sessions')
   }
   await host.openSession(id, { profile })
+  if (ORIGIN_CHAT_RETURN_PATH) {
+    void settleOriginPrints()
+  }
   if (gatewayGeneration !== $sessionsGatewayGeneration.get()) return
   $botSelectedSessions.set({ ...$botSelectedSessions.get(), [profile]: id })
 }
@@ -5526,6 +5719,16 @@ export default {
           }
         })
         .catch(() => undefined)
+      Promise.resolve(ctx.storage?.get?.('origin-prints'))
+        .then(value => {
+          if (ORIGIN_CHAT_RETURN_PATH && Array.isArray(value) && value.length) {
+            $originPrints.set(value.slice(-40))
+            void settleOriginPrints()
+          }
+        })
+        .catch(err => {
+          console.warn('[hermes-bots] origin-prints hydrate failed', err)
+        })
     } catch {
       /* no storage on this shell — defaults stay */
     }
@@ -5547,6 +5750,9 @@ export default {
     host.state.profile.listen(profile => {
       if (profile && typeof profile === 'string') {
         $selectedBot.set(profile)
+        if (ORIGIN_CHAT_RETURN_PATH) {
+          void settleOriginPrints()
+        }
       }
     })
     host.state.gateway.listen(handleSessionsGatewayTransition)
@@ -5681,6 +5887,12 @@ export default {
             mentioned.map(n => '`hermes -p ' + shellQuote(n) + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + shellDoubleQuote(senderName) + ' (@' + shellDoubleQuote(botHandle(active)) + '): <your composed message>"`').join('\n') +
             '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
             'Relay the reply back to the user, attributed to that agent.]'
+
+          rememberOriginHandoff({
+            originSessionId: originSessionId(),
+            originProfile: active,
+            targets: mentioned
+          })
 
           return { ...draft, text: text + note }
         }      }
