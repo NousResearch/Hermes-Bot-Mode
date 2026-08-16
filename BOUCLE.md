@@ -18,7 +18,7 @@ Méthode: boucle-tdd-cicd (red→green→refactor). Chaque tâche = 1 commit, v�
 | 5 | storage save/load | CA7,CA7b,CA8,CA7c,CA7d,CA7e | ✅ DONE (commit 495746a) + REVIEW-APPROVED (0 🔴) | 1 | 0 | 0 |
 | 6 | runTeamFanout | CA6,CA6b,CA6c | ✅ DONE (commit 238a8e6) + REVIEW-APPROVED (0 🔴) + D16/D17 hardening (c57eb3f) | 1 | 0 | 0 |
 | 7 | generate-guard | CA9 | ✅ DONE (commit c57eb3f + CA9 test 65/65) | 1 | 0 | 0 |
-| 8 | UI wiring + CA11 | CA11 | 🔄 Scaffold test OK (Task 0, 4 entrées) ; wiring React plugin.js NON fait (PR #17 revert) | 0 | 0 | 0 |
+| 8 | UI wiring + CA11 | CA11 | ✅ DONE (commit 074a2a2) + FIX inline (e4f50d7) — deployed, no load error | 1 | 0 | 0 |
 | 9 | Global CI check | CA12,CA13 | ✅ DONE (node --check + node --test green, CA12/CA13 tests) | 1 | 0 | 0 |
 
 ## Décisions de revue (revue-qualite-dette)
