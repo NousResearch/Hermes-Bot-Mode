@@ -8,7 +8,11 @@ const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
 function loadApplyAdvancedConfig(request) {
   const start = source.indexOf('async function applyAdvancedConfig(')
   const end = source.indexOf('// ── edit profile dialog', start)
-  const context = { host: { request } }
+  const context = {
+    host: { request },
+    ensureMessagingProtocol: soul => soul,
+    $lastRoster: { get: () => [] }
+  }
   const section = source
     .slice(start, end)
     .concat('\nglobalThis.__advanced = { applyAdvancedConfig };\n')
