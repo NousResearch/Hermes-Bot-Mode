@@ -2950,7 +2950,12 @@ function userCurrencySymbol() {
 function costBadge(costState, model, provider) {
   if (costState === 'paid') {
     return jsx('span', {
-      className: 'shrink-0 text-[0.875rem] font-semibold leading-none text-[#10b981]',
+      className: 'shrink-0 text-[0.875rem] font-semibold leading-none',
+      // Inline color: the app's plugin class pipeline doesn't generate
+      // arbitrary `text-[#hex]` utilities, so theme/scan-dependent classes
+      // would fall back to inherited gray. TrendSaaS brand emerald (#10b981)
+      // is stable in both light and dark palettes.
+      style: { color: '#10b981' },
       title: `${model} via ${provider || 'unknown provider'} — paid LLM`,
       'aria-label': 'paid LLM',
       children: userCurrencySymbol()
