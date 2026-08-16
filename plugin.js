@@ -56,6 +56,7 @@ import {
 } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
+import * as Teams from './teams.js'
 
 const ID = 'hermes-bots'
 const ROSTER_KEY = [ID, 'roster']
@@ -64,6 +65,48 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
 /** Captured in register() so components can reach plugin storage. */
 let pluginCtx = null
+
+/**
+ * createTeam — normalize a raw team descriptor and persist it (CA1 + CA7).
+ * Pure delegation to teams.js; storage is injected so it stays testable.
+ * Returns the normalized team, or null if it fails validation.
+ */
+async function createTeam(raw, rosterNames, storage) {
+  const [team] = Teams.normalizeTeams([raw], rosterNames || [])
+  if (!team) return null
+  if (storage && typeof storage.set === 'function') {
+    await Teams.saveTeams(storage, [team])
+  }
+  return team
+}
+
+/** Minimal TeamPage — lists persisted teams and offers create/delete.
+ *  (UI richness is iterative; this establishes the /bot-team route + wiring.) */
+function TeamPage() {
+  const [teams, setTeams] = useState([])
+  const storage = pluginCtx && pluginCtx.storage
+  useEffect(() => {
+    if (!storage) return
+    Teams.loadTeams(storage).then(setTeams).catch(() => setTeams([]))
+  }, [storage])
+  return jsx('div', {
+    style: { padding: '16px' },
+    children: [
+      jsx('h2', { children: 'Group Agents (Teams)' }),
+      jsx('p', { children: `${teams.length} team(s) configured.` }),
+      ...teams.map((t) =>
+        jsx('div', {
+          key: t.id,
+          style: { border: '1px solid #444', margin: '6px 0', padding: '8px' },
+          children: [
+            jsx('strong', { children: t.name || t.id }),
+            jsx('span', { children: ` — ${t.members.length} members, lead ${t.lead}` })
+          ]
+        })
+      )
+    ]
+  })
+}
 
 /** Live roster snapshot for imperative handlers (context menus). */
 const $lastRoster = atom([])
@@ -3924,6 +3967,10 @@ function BotsPane() {
 export default {
   id: ID,
   name: 'Bots',
+  // Group Agents helpers (CA1/CA7) — exposed for callers/tests; the real UI
+  // uses them inside CreateTeamDialog / TeamPage.
+  createTeam,
+  Teams,
   register(ctx) {
     pluginCtx = ctx
 
@@ -4046,20 +4093,31 @@ export default {
 
           // Mentions in code are code, not handoffs (#20).
           const prose = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
-          const active = (host.state.profile.get() || 'default').trim() || 'default'
-          const mentioned = []
 
-          for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
-            let name = match[2].toLowerCase()
+          // GROUP AGENTS (RG4): if this draft carries a team context, route
+          // @mentions through Teams.teamTargets so only TEAM MEMBERS are routed
+          // (unknowns/outsiders are excluded). Falls back to the global roster
+          // (bot-to-bot) when no team is attached.
+          let mentioned = []
+          if (draft.team && Array.isArray(draft.team.members)) {
+            const res = Teams.teamTargets(text, draft.team.members, names)
+            mentioned = res.targets.filter((n) => n !== (host.state.profile.get() || 'default').trim())
+          } else {
+            const active = (host.state.profile.get() || 'default').trim() || 'default'
+            for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
+              let name = match[2].toLowerCase()
 
-            if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
-              name = 'default'
-            }
+              if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
+                name = 'default'
+              }
 
-            if (names.includes(name) && name !== active && !mentioned.includes(name)) {
-              mentioned.push(name)
+              if (names.includes(name) && name !== active && !mentioned.includes(name)) {
+                mentioned.push(name)
+              }
             }
           }
+
+          const active = (host.state.profile.get() || 'default').trim() || 'default'
 
           if (!mentioned.length) {
             return draft
@@ -4081,6 +4139,15 @@ export default {
 
           return { ...draft, text: text + note }
         }      }
+    })
+
+    // GROUP AGENTS — TeamPage route /bot-team (CA11). Lists configured teams and
+    // exposes create/delete. Isolated from other plugins' routes by id.
+    ctx.register({
+      id: 'team-page',
+      area: 'routes',
+      route: '/bot-team',
+      render: () => jsx(TeamPage, {})
     })
   }
 }

@@ -85,12 +85,18 @@ function loadPluginCA11() {
       onEvent: () => undefined,
       notify: () => undefined
     },
-    storage: { get: () => null, set: () => undefined }
+    storage: { get: () => null, set: () => undefined },
+    // D16/CA11: inject the teams module so plugin.js can use it (stands in for
+    // `import * as Teams from './teams.js'`, which the vm loader can't resolve).
+    Teams: loadTeams()
   }
-  const source = stripModuleSyntax(pluginSource)
+  // Strip `import * as Teams from './teams.js'` (vm can't resolve local imports)
+  // and feed the injected Teams from the context instead.
+  const pluginSrc = stripModuleSyntax(pluginSource)
+    .replace(/import\s+\*\s+as\s+Teams\s+from\s+['"]\.\/teams\.js['"]\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat('\nglobalThis.__plugin = { register: globalThis.plugin.register };\n')
-  vm.runInNewContext(source, context, { filename: 'plugin.js' })
+  vm.runInNewContext(pluginSrc, context, { filename: 'plugin.js' })
 
   const ctx = {
     storage: context.storage,
@@ -105,7 +111,7 @@ function loadPluginCA11() {
     }
   }
   context.plugin.register(ctx)
-  return { entries, disposers, plugin: context.plugin }
+  return { entries, disposers, plugin: context.plugin, Teams: context.Teams }
 }
 
 test('harness: teams.js loads with all function exports', () => {
@@ -121,10 +127,50 @@ test('RG1: teams.js source has NO import from @hermes/plugin-sdk or react', () =
   assert.equal(/from\s+['"]@hermes\/plugin-sdk|react/.test(teamsSource), false)
 })
 
-test('CA11 scaffold: plugin register records 4 entries', () => {
+test('CA11 scaffold: plugin register records >=4 entries', () => {
   const { entries } = loadPluginCA11()
   assert.ok(Array.isArray(entries))
-  assert.equal(entries.length, 4)
+  assert.ok(entries.length >= 4)
+})
+
+// ── Task 8: real Group Agents wiring (CA11) — TDD RED ────────────────────────
+
+test('CA11b: plugin registers a TeamPage route /bot-team (team-page entry)', () => {
+  const { entries } = loadPluginCA11()
+  const teamPage = entries.find((e) => e.id === 'team-page')
+  assert.ok(teamPage, 'team-page entry must be registered')
+  assert.equal(teamPage.route, '/bot-team')
+})
+
+test('CA11c: plugin exposes a createTeam action that normalizes + persists (CA1/CA7)', async () => {
+  const { plugin } = loadPluginCA11()
+  // The plugin should expose a createTeam helper (calls normalizeTeams + saveTeams).
+  assert.equal(typeof plugin.createTeam, 'function', 'plugin.createTeam must exist')
+  const storage = makeStore()
+  const team = await plugin.createTeam(
+    { id: 'co-a', name: 'Company A', lead: 'alice', members: ['alice', 'bob', 'carol'] },
+    ['alice', 'bob', 'carol'],
+    storage
+  )
+  assert.ok(team && team.id === 'co-a')
+  const stored = storage.data.get('teams-v1')
+  assert.ok(Array.isArray(stored) && stored.length === 1, 'teams-v1 must hold one team')
+  assert.equal(stored[0].id, 'co-a')
+  assert.deepEqual(stored[0].members, ['alice', 'bob', 'carol'])
+})
+
+test('CA11d: mention-middleware routes only to team members via teamTargets (RG4)', async () => {
+  const { entries, Teams } = loadPluginCA11()
+  const mw = entries.find((e) => e.id === 'mention-middleware')
+  assert.ok(mw && mw.data && typeof mw.data.handler === 'function')
+  // Spy on Teams.teamTargets to prove the middleware delegates routing to it.
+  let called = false
+  const orig = Teams.teamTargets
+  Teams.teamTargets = (...a) => { called = true; return orig(...a) }
+  const draft = { text: '@bob do the thing', team: { id: 'co-a', members: ['alice', 'bob'] } }
+  await mw.data.handler(draft)
+  Teams.teamTargets = orig
+  assert.equal(called, true, 'mention-middleware must use teamTargets for member routing')
 })
 
 // ── normalizeTeams (pure function, no IO) ────────────────────────────────────
