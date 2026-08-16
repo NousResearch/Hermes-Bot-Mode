@@ -277,7 +277,8 @@ function pullServerAvatars(roster) {
  *  fields it carries; local-only fields (avatar image data URL, extracted
  *  pet icon) are PRESERVED — the server copy never includes them, so a
  *  naive replace would wipe a just-saved image avatar on the next roster
- *  paint. Local also fills gaps for older gateways. */
+ *  paint. When server bot metadata exists, an omitted chat is authoritative
+ *  deletion; local still fills all gaps for older gateways with no metadata. */
 function mergeServerMeta(roster) {
   const local = $botMeta.get()
   let changed = false
@@ -294,6 +295,16 @@ function mergeServerMeta(roster) {
         merged.image = mine.image
       }
 
+      // Server metadata is authoritative for the canonical chat pointer.
+      // Without this deletion sync, ctx.storage resurrects stale sessions
+      // after the server pin is cleared and even after a full app restart.
+      if (
+        Object.prototype.hasOwnProperty.call(mine, 'chat') &&
+        !Object.prototype.hasOwnProperty.call(server, 'chat')
+      ) {
+        delete merged.chat
+      }
+
       if (JSON.stringify(next[bot.name] || null) !== JSON.stringify(merged)) {
         next[bot.name] = merged
         changed = true
@@ -303,6 +314,14 @@ function mergeServerMeta(roster) {
 
   if (changed) {
     $botMeta.set(next)
+
+    // Persist server reconciliation so a relaunch cannot rehydrate stale
+    // local fields that the server intentionally removed.
+    try {
+      Promise.resolve(pluginCtx?.storage?.set?.('bot-meta', next)).catch(() => undefined)
+    } catch {
+      /* storage unavailable — reconciliation lasts for this window only */
+    }
   }
 }
 
