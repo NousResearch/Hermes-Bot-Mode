@@ -87,7 +87,10 @@ test('ActiveNowStrip renders above the roster, is a live region, and is click-ac
   assert.match(source, /'aria-live': 'polite'/)
   // Chips are real buttons (keyboard/click accessible), reuse BotFace, and
   // open the canonical chat via the same path as roster rows.
-  assert.match(source, /jsx\('button', \{\s*type: 'button',\s*key: bot\.name/)
+  assert.match(source, /jsx\('button', \{\s*type: 'button',\s*title: `Open \$\{label\}'s chat`/)
+  // The key rides as jsx()'s third argument — the ONLY form React treats as
+  // a list key; a `key:` prop leaves chips unkeyed (index identity).
+  assert.match(source, /\}, bot\.name\)\s*\}\)\s*\]\s*\}\)\s*\}\s*\/\*\* Assign a bot to a group/s)
   assert.match(source, /jsx\(BotFace,\s*\{[\s\S]*?mood: 'work'/)
   assert.match(source, /openBotCanonicalChat\(bot\.name, allMeta\[bot\.name\]\?\.chat\)/)
 })
