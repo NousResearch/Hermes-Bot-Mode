@@ -2,6 +2,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 
 const teamsSource = readFileSync(new URL('../teams.js', import.meta.url), 'utf8')
 const pluginSource = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
@@ -701,6 +704,39 @@ test('assertTeamGeneration throws on mismatch, passes on match', () => {
   assert.doesNotThrow(() => T.assertTeamGeneration(g))
   T.bumpTeamGeneration()
   assert.throws(() => T.assertTeamGeneration(g), /generation mismatch/)
+})
+
+test('CA9: bumping generation invalidates in-flight waiters (reload race guard)', async () => {
+  const T = loadTeams()
+  const team = { id: 'co-a', lead: 'alice', members: ['alice'] }
+  const host = makeHost({ replyMap: { 'sess-1': 'A' } })
+  const captured = T.getCurrentGeneration()
+  // Simulate a plugin hot-reload between fanout start and completion.
+  T.bumpTeamGeneration()
+  await assert.rejects(
+    T.runTeamFanout(team, 'hi', { host, generation: captured }),
+    /generation mismatch/
+  )
+})
+
+// ── Task 9: Global CI check (CA12 syntax, CA13 test run) ─────────────────────
+
+test('CA12: teams.js passes node --check (syntax/CI gate)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const teamsPath = join(here, '..', 'teams.js')
+  // Throws on non-zero exit (syntax error).
+  const out = execFileSync(process.execPath, ['--check', teamsPath], { encoding: 'utf8' })
+  assert.equal(out, '') // --check prints nothing on success
+})
+
+test('CA13: full test suite exits 0 (CI gate)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const suite = join(here, 'group-agents.test.mjs')
+  // execFileSync throws on non-zero exit; reaching the next line proves green.
+  // (node --test prints its summary to stderr, so we only assert the process
+  // exited 0 by not throwing.)
+  execFileSync(process.execPath, ['--test', suite], { stdio: 'ignore' })
+  assert.ok(true)
 })
 
 // ── Recuperation D14 / D15 (revue Task 5) ──────────────────────────────────
