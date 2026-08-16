@@ -26,7 +26,7 @@ function runtime() {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__previewKind = previewKind;\nglobalThis.__generatedSessionTitle = generatedSessionTitle;\nglobalThis.__isGenericTitle = isGenericTitle;'
+      '\nglobalThis.__previewKind = previewKind;\nglobalThis.__generatedSessionTitle = generatedSessionTitle;\nglobalThis.__isGenericTitle = isGenericTitle;\n\nglobalThis.__recentHandoffs = recentHandoffs;\nglobalThis.__openLoopsByBot = openLoopsByBot;globalThis.__fleetSummary = fleetSummary;\nglobalThis.__needsYouOf = needsYouOf;\nglobalThis.__rawChatCommand = rawChatCommand;\nglobalThis.__messagingProtocolSection = messagingProtocolSection;\n\n\n'
     )
   vm.runInNewContext(code, context)
   return context
@@ -132,7 +132,7 @@ function renderRuntime() {
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
-    .concat('\nglobalThis.__BotRow = BotRow;')
+    .concat('\nglobalThis.__BotRow = BotRow;\nglobalThis.__openTooltip = openTooltip;')
   vm.runInNewContext(code, context)
   return context
 }
@@ -189,3 +189,195 @@ test('render: BotRow tolerates a fresh bot with no sessions yet', () => {
   const text = textOf(tree)
   assert.match(text, /Fresh bot/)
 })
+
+test('tooltip: names the pinned canonical Bot Chat explicitly', () => {
+  const r = renderRuntime()
+  assert.equal(
+    r.__openTooltip({ id: 's1', title: 'Bot Chat' }, 's1'),
+    'Opens: Bot Chat (canonical)'
+  )
+})
+
+test('tooltip: marks a different latest-active session so the divergence is visible', () => {
+  const r = renderRuntime()
+  assert.equal(
+    r.__openTooltip({ id: 's2', title: 'Premarket' }, 's1'),
+    'Opens: Premarket (latest active)'
+  )
+})
+
+test('tooltip: falls back to the title without a marker when ids are unavailable', () => {
+  const r = renderRuntime()
+  assert.equal(r.__openTooltip({ title: 'Bot Chat' }, 's1'), 'Opens: Bot Chat')
+})
+
+test('tooltip: promises a new Bot Chat when the bot has no sessions yet', () => {
+  const r = renderRuntime()
+  assert.equal(r.__openTooltip(null, undefined), 'Opens: new Bot Chat')
+})
+
+// ── roster search: pure filter over name / handle / title / description ─────
+
+
+
+
+
+
+
+// ── recent activity: newest-first, capped, DM-attributed ─────────────────────
+
+function activityOf(roster, limit) {
+}
+
+const ACTIVE_ROSTER = [
+  {
+    name: 'scribe',
+    last_session: { title: 'Bot Chat', preview: 'Message from 🤖 manager (@manager): Learn-share: skill installed', last_active: 100 }
+  },
+  { name: 'trader', last_session: { title: 'Premarket', preview: 'AAPL scan done', last_active: 200 } },
+  { name: 'ops', last_session: { title: '', preview: 'Vault sync ok', last_active: 50 } },
+  { name: 'fresh', description: 'no sessions yet' }
+]
+
+
+
+
+
+// ── handoff ledger: who threw what at whom, and whether they answered ───────
+
+const HANDOFF_ROSTER = [
+  {
+    name: 'scribe',
+    last_session: {
+      title: 'Bot Chat',
+      preview: 'Message from 🤖 manager (@manager): file the review',
+      last_active: 100
+    }
+  },
+  {
+    name: 'manager',
+    last_session: { title: 'Bot Chat', preview: 'Message from 🤖 scribe (@scribe): done — filed', last_active: 300 }
+  },
+  { name: 'trader', last_session: { title: 'Premarket', preview: 'AAPL scan done', last_active: 200 } },
+  { name: 'fresh', description: 'no sessions yet' }
+]
+
+test('recentHandoffs: pairs a bot-to-bot send with the recipient reply', () => {
+  const out = runtime().__recentHandoffs(HANDOFF_ROSTER)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].from, 'manager')
+  assert.equal(out[0].to, 'scribe')
+  assert.equal(out[0].status, 'replied')
+  assert.match(out[0].replyPreview, /done — filed/)
+})
+
+test('recentHandoffs: unanswered sends are awaiting_reply', () => {
+  const out = runtime().__recentHandoffs([
+    {
+      name: 'scribe',
+      last_session: { title: 'Bot Chat', preview: 'Message from 🤖 manager (@manager): urgent?', last_active: 100 }
+    },
+    { name: 'manager', last_session: { title: 'Weekly', preview: 'reviewing notes', last_active: 50 } }
+  ])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].status, 'awaiting_reply')
+})
+
+test('recentHandoffs: caps the list', () => {
+  const out = runtime().__recentHandoffs(HANDOFF_ROSTER, 1)
+  assert.equal(out.length, 1)
+})
+
+test('openLoopsByBot: counts only unanswered sends per sender', () => {
+  const out = runtime().__openLoopsByBot([
+    {
+      name: 'scribe',
+      last_session: { title: 'Bot Chat', preview: 'Message from 🤖 manager (@manager): do thing A', last_active: 100 }
+    },
+    { name: 'manager', last_session: { title: 'Bot Chat', preview: 'Message from 🤖 scribe (@scribe): did it', last_active: 300 } },
+    {
+      name: 'trader',
+      last_session: { title: 'Bot Chat', preview: 'Message from 🤖 manager (@manager): do thing B', last_active: 90 }
+    }
+  ])
+  // thing A was answered (scribe replied); thing B is still open.
+  assert.equal(out.manager, 1)
+  assert.equal(out.scribe, undefined)
+})
+
+test('needsYouOf: surfaces only unseen bot-to-bot replies', () => {
+  const out = runtime().__needsYouOf(HANDOFF_ROSTER, { manager: true })
+  assert.equal(out.length, 1)
+  assert.equal(out[0].bot.name, 'manager')
+  assert.equal(out[0].from, 'scribe')
+  assert.equal(out[0].kind, 'reply_to_relay')
+})
+
+test('needsYouOf: empty when everything is read', () => {
+  assert.equal(runtime().__needsYouOf(HANDOFF_ROSTER, {}).length, 0)
+})
+
+// ── fleet summary: one-glance "what is happening" counts ───────────────────
+
+const SUMMARY_ROSTER = [
+  { name: 'scribe', last_session: { preview: 'Message from 🤖 manager (@manager): do thing A', last_active: 5 } },
+  { name: 'trader', last_session: { preview: 'AAPL scan done', last_active: 200 } },
+  { name: 'ops', last_session: { preview: 'vault sync ok', last_active: 400 } },
+  { name: 'fresh', description: 'no sessions yet' }
+]
+
+function summaryOf(roster, meta, unread, active, busy, now) {
+  return runtime().__fleetSummary(roster, meta, unread, active, busy, now)
+}
+
+test('fleetSummary: counts working only for the active profile while the gateway is busy', () => {
+  assert.equal(summaryOf(SUMMARY_ROSTER, {}, {}, 'ops', true, 500).working, 1)
+  assert.equal(summaryOf(SUMMARY_ROSTER, {}, {}, 'ops', false, 500).working, 0)
+  assert.equal(summaryOf(SUMMARY_ROSTER, {}, {}, 'trader', true, 500).working, 1)
+})
+
+test('fleetSummary: counts unread and paused from meta', () => {
+  const out = summaryOf(SUMMARY_ROSTER, { trader: { paused: true } }, { ops: true }, 'ops', false, 500)
+  assert.equal(out.unread, 1)
+  assert.equal(out.paused, 1)
+})
+
+test('fleetSummary: counts only bots that wrote within the 90s window as active', () => {
+  const roster = [
+    { name: 'a', last_session: { preview: 'x', last_active: 495 } }, // 5s before now → active
+    { name: 'b', last_session: { preview: 'y', last_active: 400 } }, // 100s before now → not
+    { name: 'c', last_session: { preview: 'z', last_active: 0 } } // ancient → not
+  ]
+  const out = summaryOf(roster, {}, {}, 'ops', false, 500)
+  assert.equal(out.active, 1)
+})
+
+test('fleetSummary: needYou mirrors the needs-you inbox count', () => {
+  const out = summaryOf(SUMMARY_ROSTER, {}, { scribe: true }, 'ops', false, 500)
+  assert.equal(out.needYou, 1)
+})
+
+test('fleetSummary: tolerates empty roster and missing meta/unread', () => {
+  const out = summaryOf([], null, null, 'ops', false, 100)
+  assert.equal(out.working + out.unread + out.active + out.paused + out.needYou, 0)
+})
+
+// ── handoff protocol: the command and the SOUL protocol text ────────────────
+
+test('rawChatCommand: is the canonical handoff command shape', () => {
+  const r = runtime()
+  const cmd = r.__rawChatCommand('ops', 'scribe', 'hello')
+  assert.match(cmd, /^hermes -p 'scribe' chat --in ~ -c "Bot Chat" -Q -q /)
+  assert.match(cmd, /Message from 🤖 ops \(@ops\): hello/)
+})
+
+test('messagingProtocolSection: documents the hermes chat handoff command', () => {
+  const r = runtime()
+  const section = r.__messagingProtocolSection('ops', [{ name: 'scribe', description: 'Scribe' }])
+  assert.match(section, /hermes -p <agent-name> chat --in ~ -c "Bot Chat"/)
+  assert.doesNotMatch(section, /fleet-dispatch/)
+})
+
+// ── needs-you: who is waiting on a human, and how long ──────────────────────
+
+

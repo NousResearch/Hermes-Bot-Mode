@@ -9,7 +9,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 ## What you get
 
 - **Bots pane** — a left-side roster with one row per agent profile: avatar, latest-message preview, and timestamp. Click a bot to land in its chat, or use **Sessions** from its context menu to browse and filter its 200 most recent stored conversations.
-- **Active now** — a presence strip above the roster shows every bot currently working (the gateway-busy profile plus any bot that wrote within the last 90s), each chip opening its canonical chat. It never reorders the roster and disappears when the fleet is idle.
+- **Active now** — a presence strip above the roster shows every bot currently working (the gateway-busy profile plus any bot that wrote within the last 90s), each chip opening its canonical chat. It never reorders the roster and disappears when no bot is working.
 - **New Agent** — create a bot in seconds: name, title, description. An **Advanced** disclosure opens the full profile config: clone from an existing profile, pin a provider/model, write a custom SOUL.md, skip bundled skills.
 - **Edit Profile** (right-click a bot) — change the avatar, title, and description any time; its own Advanced section edits the live profile: per-skill and per-toolset enablement, model pin, and the full SOUL.md.
 - **Groups** (right-click → Move to group) — organize the roster into labeled sections with separators: pick an existing group or create one inline. Ungrouped bots stay on top; groups follow alphabetically and sync to every machine. A group disappears when its last member leaves.
@@ -20,6 +20,8 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 - **Routines pane** — recurring tasks per bot, backed by Hermes cron. "Summarize my inbox every morning" lives next to the bot that does it. Runs land in the bot's own chat history.
 - **Bot-to-bot messaging** — every bot has a persistent **Bot Chat** conversation. Bots message each other with attribution (`Message from 🤖 researcher (@researcher): ...`), and their SOUL.md teaches them the protocol, including how to reply.
 - **@mentions** — type `@researcher have a look at this` in any chat and the active bot hands the message off, waits for the reply, and reports back.
+- **Needs-you strip** — when bots reply to each other while you're elsewhere, the Bots pane says so: a "N need you" chip jumps to the newest waiting reply, and open loops (sent, not yet replied) badge the sender's row. When nothing needs you, the strip stays quiet.
+- **Pause / Mute** — right-click a bot: **Pause** blocks its handoffs, **Mute** keeps it working but silences its notifications. A "pause all" chip in the pane header is the global brake.
 
 ## How it works
 
@@ -47,6 +49,14 @@ No core patches, no background daemons, no extra storage: everything is standard
 
 <img width="1313" height="612" alt="image" src="https://github.com/user-attachments/assets/c45b1e96-4362-4462-a049-ba8c44b87bed" />
 
+## Testing
+
+```bash
+node --test tests/*.test.mjs
+```
+
+> **Gotcha:** the directory form `node --test tests/` fails — the test files import from `../scripts/` and need explicit glob expansion. Always use the glob form above.
+
 ## Install
 
 > **This is a desktop plugin** — it must be installed on the machine running the **Hermes desktop app**, not on the gateway. Desktop plugins load from the app-side `~/.hermes/desktop-plugins/` directory; if you use a remote/SSH gateway, installing on the gateway box does nothing. (Example: gateway on your homelab, desktop app on your MacBook → install on the MacBook.)
@@ -67,7 +77,7 @@ Then reload plugins in the Hermes desktop app (Ctrl+K → "Reload desktop plugin
 
 ## Notes
 
-- Bot-to-bot delivery is per-invocation (the receiving bot sees the message in its inbox when it next runs); live interrupt of a mid-conversation bot is upstream future work.
+- Bot-to-bot delivery is per-invocation (the receiving bot sees the message in its inbox when it next runs). Pause set in the Bots pane is enforced in-app by the @mention middleware. Live interrupt of a mid-conversation bot is upstream future work.
 - Avatar/pet customizations are stored in plugin storage; the profile itself stays clean.
 
 ## License

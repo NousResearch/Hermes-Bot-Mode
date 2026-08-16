@@ -100,6 +100,14 @@ function setActivityToasts(enabled) {
   }
 }
 
+// Per-bot toast cooldown: once a bot has toasted, suppress further toasts
+// for TOAST_COOLDOWN_MS. Without this, an active squad (bot-to-bot
+// handoffs, cron runs) bumps last_active on every poll (5s) and spams the
+// human with a notification every few seconds. The unread badge still
+// updates — only the toast is throttled.
+const TOAST_COOLDOWN_MS = 60_000
+const lastToastAt = new Map()
+
 /** Detect new inbound activity from a fresh roster: last_active moved past
  *  the watermark for a bot whose chat isn't on screen -> unread + toast. */
 function trackInboundActivity(roster) {
@@ -130,6 +138,22 @@ function trackInboundActivity(roster) {
       const label = displayName(bot, meta)
       const preview = (bot.last_session?.preview || '').trim()
       const inbound = /^Message from/i.test(preview)
+
+      // Muted bots still badge (the dot is quiet context) but never toast —
+      // the human muted them on purpose.
+      if (meta?.muted) {
+        continue
+      }
+
+      // Cooldown: badge updates every poll, but toast at most once per bot
+      // per TOAST_COOLDOWN_MS. Prevents squad chatter from pinging the human
+      // every few seconds.
+      const now = Date.now()
+      const last = lastToastAt.get(bot.name) || 0
+      if (now - last < TOAST_COOLDOWN_MS) {
+        continue
+      }
+      lastToastAt.set(bot.name, now)
 
       host.notify({
         kind: 'info',
@@ -2112,8 +2136,39 @@ async function openBotCanonicalChat(name, pinned) {
       return createCanonicalChat(name)
     }
 
-    if (!rows.some(session => session.id === id)) {
-      id = rows[0].id
+    // Resolve to the session the roster row actually previews — the bot's
+    // most recently active session — instead of blindly trusting a
+    // possibly-stale pin. A stale pin (its session still exists in the list)
+    // used to win here and open a different chat than the row promised.
+    //
+    // A deliberately pinned canonical Bot Chat is preserved: when the pin is
+    // still the newest session it opens as-is, and when a DIFFERENT session
+    // is strictly more recent (the running one the row shows) we open THAT
+    // without rewriting meta.chat — the canonical identity stays intact and
+    // the row's tooltip says which one you are opening. The pin is only
+    // re-pointed when it is genuinely missing from the list (recovery), and
+    // selection is by last_active, never array position.
+    const pinRow = rows.find(session => session.id === id)
+    // session.list is ordered newest-first by the gateway (order_by_last_active),
+    // but the response only carries a last_active timestamp on newer gateways.
+    // Prefer the timestamp when any row has one; otherwise the gateway's first
+    // row IS the newest — the same session profiles.list reports as
+    // last_session, so opening it is exactly what the row preview promises.
+    const hasActivity = rows.some(session => (session.last_active || 0) > 0)
+    const target = hasActivity
+      ? rows.reduce(
+          (best, session) => ((session.last_active || 0) > (best.last_active || 0) ? session : best),
+          rows[0]
+        )
+      : rows[0]
+
+    if (pinRow && target.id !== id) {
+      // The previewed (newest) session differs from the pin — open what the
+      // row shows, but keep the pinned canonical chat intact.
+      id = target.id
+    } else if (!pinRow) {
+      // Pin is gone from the list — recover to the newest known session.
+      id = target.id
       saveBotMeta(name, { chat: id })
     }
   } catch {
@@ -2163,6 +2218,22 @@ function filterBots(roster, metaByName, query) {
     const handle = botHandle(bot.name).toLowerCase()
     return display.includes(needle) || profile.includes(needle) || handle.includes(needle)
   })
+}
+
+/** Shared open path: same canonical-chat resolution the recent-handoffs
+ *  feed uses, with the older-gateway draft fallback for hosts without
+ *  profile-scoped session.create. */
+async function openBotChat(bot, meta) {
+  haptic('tap')
+  $selectedBot.set(bot.name)
+
+  if ($botUnread.get()[bot.name]) {
+    const next = { ...$botUnread.get() }
+    delete next[bot.name]
+    $botUnread.set(next)
+  }
+
+  return openBotCanonicalChat(bot.name, meta?.chat)
 }
 
 function slugify(value) {
@@ -2709,7 +2780,7 @@ function messagingProtocolSection(name, roster) {
     'into it, like a DM. To message a teammate, run:',
     '',
     '```',
-    'hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + name + ' (@' + name + '): your message"',
+    `hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from 🤖 ${name} (@${name}): your message"`,
     '',
     'Run the send with background=true and notify_on_complete=true on the',
     'terminal tool, then finish your turn — the reply arrives later as a',
@@ -2763,6 +2834,15 @@ function composeSoul({ name, title, description, roster, customSoul }) {
 }
 
 // ── human-readable row helpers ───────────────────────────────────────────────
+
+/** The exact terminal command a bot runs to hand a task to a teammate —
+ *  shared by the SOUL protocol and the @mention middleware so every path
+ *  uses the same dispatch. Keeps every interpolated value shell-literal
+ *  (same class as the routine-prompt fix #21): profile names and sender
+ *  titles are free text from ui_meta. */
+function rawChatCommand(from, to, message) {
+  return `hermes -p ${shellQuote(to)} chat --in ~ -c "Bot Chat" -Q -q "Message from 🤖 ${shellDoubleQuote(from)} (@${shellDoubleQuote(from)}): ${message}"`
+}
 
 /** Bot-to-bot delivery prefix (see messagingProtocolSection): either the
  *  current "Message from 🤖 name (@handle):" form or the older
@@ -2834,7 +2914,20 @@ function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
 
 // ── bot row ──────────────────────────────────────────────────────────────────
 
-function BotRow({ bot, onDelete, onEdit, onGroup }) {
+/** Tooltip for a BotRow button: names the session a click will open and marks
+ *  whether it is the pinned canonical Bot Chat or a different latest-active
+ *  session — the row can never silently promise one chat and open another. */
+function openTooltip(last, pinnedChat) {
+  if (!last) {
+    return 'Opens: new Bot Chat'
+  }
+
+  const marker =
+    last.id && pinnedChat ? (last.id === pinnedChat ? ' (canonical)' : ' (latest active)') : ''
+  return `Opens: ${last.title || 'Untitled session'}${marker}`
+}
+
+function BotRow({ bot, onDelete, onEdit, onGroup, openLoops = 0 }) {
   const activeProfile = useValue(host.state.profile)
   const meta = useValue($botMeta)[bot.name]
   const last = bot.last_session
@@ -2849,6 +2942,11 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   // liveness window. Not every bot whenever the gateway is busy.
   const botMood = (isActive && gatewayState === 'busy') || activeNow ? 'work' : 'idle'
   const unread = Boolean(useValue($botUnread)[bot.name])
+  // Pause/mute controls: paused blocks handoff dispatch (enforced in-app by
+  // the mention middleware); muted silences toasts while keeping the unread
+  // badge.
+  const paused = Boolean(meta?.paused)
+  const muted = Boolean(meta?.muted)
   // WHO sent the last message (bot-to-bot DM vs human) — the full stored
   // history lives in the Sessions workspace (context menu), not inline.
   const { fromBot } = previewKind(last?.preview)
@@ -2901,6 +2999,12 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     type: 'button',
     onPointerEnter: warm,
     onClick: open,
+    // The "which session will this open" affordance: hover shows the exact
+    // chat the click resolves to. When the previewed session is the pinned
+    // canonical Bot Chat it says so; when a different (newer) session will
+    // open instead, the row says "latest active" so the divergence is never
+    // silent.
+    title: openTooltip(last, meta?.chat),
     className: cn(
       'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
       'hover:bg-(--chrome-action-hover)',
@@ -2927,6 +3031,20 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
                         children: '📌'
                       })
                     : null,
+                  paused
+                    ? jsx('span', {
+                        className: 'shrink-0 text-[0.6875rem]',
+                        title: 'Paused — handoffs blocked',
+                        children: '⏸'
+                      })
+                    : null,
+                  muted
+                    ? jsx('span', {
+                        className: 'shrink-0 text-[0.6875rem]',
+                        title: 'Muted — no notifications',
+                        children: '🔇'
+                      })
+                    : null,
                   jsx('span', {
                     className: 'truncate text-[0.8125rem] font-medium',
                     children: displayName(bot, meta)
@@ -2949,6 +3067,14 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
                 ? jsx('span', {
                     className: 'hermes-bots-pulse size-1.5 shrink-0 rounded-full bg-(--ui-accent,#4f9cf9)',
                     title: 'Active in the last 90s'
+                  })
+                : null,
+              openLoops > 0
+                ? jsx('span', {
+                    className:
+                      'shrink-0 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium leading-4 text-amber-400',
+                    title: `${openLoops} open handoff${openLoops === 1 ? '' : 's'} awaiting reply`,
+                    children: `${openLoops} open`
                   })
                 : null,
               last
@@ -5893,6 +6019,215 @@ function GroupChatWorkspace({ group, members }) {
   })
 }
 
+function RosterGroupLabel({ children }) {
+  return jsx('div', {
+    className: 'px-1.5 pb-0.5 pt-2 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
+    children
+  })
+}
+
+function recentHandoffs(roster, limit = 6) {
+  const byName = new Map((roster || []).map(bot => [bot.name, bot]))
+  const sends = []
+
+  for (const bot of roster || []) {
+    const last = bot.last_session
+    const from = last ? previewKind(last.preview || '').fromBot : null
+
+    if (!last || !from) {
+      continue
+    }
+
+    sends.push({
+      bot,
+      from,
+      to: bot.name,
+      message: (last.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…',
+      sentAt: last.last_active || 0
+    })
+  }
+
+  // A send whose (from,to) reverses an EARLIER send is that handoff's reply,
+  // not a new task — it carries the resolution, so it doesn't get its own
+  // ledger row (with one preview per bot it can only be the reply).
+  const handoffs = sends
+    .filter(send => !sends.some(other => other.from === send.to && other.to === send.from && other.sentAt < send.sentAt))
+    .map(send => {
+      const senderLast = byName.get(send.from)?.last_session
+      const reply =
+        senderLast &&
+        previewKind(senderLast.preview || '').fromBot === send.to &&
+        (senderLast.last_active || 0) > send.sentAt
+          ? senderLast
+          : null
+
+      return {
+        ...send,
+        status: reply ? 'replied' : 'awaiting_reply',
+        replyPreview: reply ? (reply.preview || '').replace(A2A_PREFIX_RE, '').trim() : null,
+        replyAt: reply ? reply.last_active : null
+      }
+    })
+
+  return handoffs.sort((a, b) => b.sentAt - a.sentAt).slice(0, limit)
+}
+
+/** Open loops per bot name: how many handoffs THAT bot sent that haven't
+ *  been answered. Drives the amber "N open" badge on roster rows. */
+function openLoopsByBot(roster) {
+  const counts = {}
+
+  for (const handoff of recentHandoffs(roster, 100)) {
+    if (handoff.status === 'awaiting_reply') {
+      counts[handoff.from] = (counts[handoff.from] || 0) + 1
+    }
+  }
+
+  return counts
+}
+
+/** One-glance bot-activity state for the pane's summary strip: what is
+ *  happening RIGHT NOW, as plain counts — working, unread, active, paused,
+ *  and how many items sit in the Needs-you strip. Pure (inject `now`) so
+ *  tests can pin the window logic. */
+
+function fleetSummary(roster, meta, unread, activeProfileName, gatewayBusy, now = Date.now() / 1000) {
+  const summary = { working: 0, unread: 0, active: 0, paused: 0, needYou: 0 }
+
+  for (const bot of roster || []) {
+    const m = (meta || {})[bot.name] || {}
+
+    if (bot.name === activeProfileName && gatewayBusy) {
+      summary.working += 1
+    }
+
+    if (m.paused) {
+      summary.paused += 1
+    }
+
+    if (unread && unread[bot.name]) {
+      summary.unread += 1
+    }
+
+    const last = bot.last_session
+
+    if (last?.last_active && now - last.last_active < ACTIVE_WINDOW_S) {
+      summary.active += 1
+    }
+  }
+
+  summary.needYou = needsYouOf(roster, unread).length
+
+  return summary
+}
+
+/** What needs a human right now: bot-to-bot replies that landed while the
+ *  recipient's chat wasn't open (the human should relay/read them), plus
+ *  previews that look like a failed handoff. Newest first. */
+function needsYouOf(roster, unread) {
+  const out = []
+
+  for (const bot of roster || []) {
+    const last = bot.last_session
+    const from = last ? previewKind(last.preview || '').fromBot : null
+
+    if (!last || !from || (unread && !unread[bot.name])) {
+      continue
+    }
+
+    const preview = (last.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…'
+
+    out.push({
+      bot,
+      from,
+      preview,
+      kind: /No session found matching|handoff failed|Error/i.test(preview) ? 'handoff_failed' : 'reply_to_relay',
+      ts: last.last_active || 0
+    })
+  }
+
+  return out.sort((a, b) => b.ts - a.ts)
+}
+
+/** Needs-you strip (lightweight preview-based activity, not a full inbox):
+ *  bot-to-bot replies that arrived unseen (relay them), and anything that
+ *  looks like a failed handoff. Loud, small, and honest — when nothing needs
+ *  you, this section does not exist. */
+function NeedsYou({ roster, unread, meta }) {
+  const items = needsYouOf(roster, unread)
+
+  if (!items.length) {
+    return null
+  }
+
+  return jsxs('div', {
+    className: 'mx-2.5 mb-1 rounded-md border border-(--ui-stroke-secondary) bg-(--chrome-action-hover)',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-1.5 px-2 py-1.5 text-[0.625rem] font-semibold uppercase tracking-wider text-amber-400',
+        children: [
+          jsx(Codicon, { name: 'alert', className: 'text-[0.8rem]' }),
+          'Needs you',
+          jsx('span', {
+            className:
+              'rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium text-(--ui-text-quaternary)',
+            children: String(items.length)
+          })
+        ]
+      }),
+      jsx('div', {
+        className: 'flex flex-col gap-px pb-1',
+        children: items.map(item => {
+          const botMeta = meta[item.bot.name] || {}
+          const { shape, color, image } = botAppearance(item.bot.name, botMeta)
+
+          return jsxs(
+            'button',
+            {
+              type: 'button',
+              className:
+                'flex w-full min-w-0 items-center gap-1.5 rounded px-2 py-1 text-left transition-colors hover:bg-(--chrome-action-hover)',
+              onClick: () => void openBotChat(item.bot, botMeta),
+              children: [
+                jsx(BotFace, { shape, color, image, size: 20, name: item.bot.name, mood: 'idle' }),
+                jsx('span', {
+                  className: 'shrink-0 font-mono text-[0.625rem] text-(--ui-text-tertiary)',
+                  children: `@${item.from} →`
+                }),
+                jsx('span', {
+                  className: 'shrink-0 text-[0.6875rem] font-medium',
+                  children: displayName(item.bot, botMeta)
+                }),
+                jsx('span', {
+                  className: 'min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-tertiary)',
+                  children: item.preview
+                }),
+                item.kind === 'handoff_failed'
+                  ? jsx('span', {
+                      className:
+                        'flex shrink-0 items-center gap-0.5 rounded-full bg-(--chrome-action-hover) px-1 py-px text-[0.5625rem] font-medium text-amber-400',
+                      children: ['⚠', 'failed']
+                    })
+                  : jsx('span', {
+                      className:
+                        'flex shrink-0 items-center gap-0.5 rounded-full bg-(--chrome-action-hover) px-1 py-px text-[0.5625rem] font-medium text-(--ui-accent,#4f9cf9)',
+                      children: ['🤖', 'reply']
+                    }),
+                jsx('span', {
+                  className: 'shrink-0 text-[0.625rem] text-(--ui-text-quaternary)',
+                  children: relativeTime(item.ts * 1000)
+                })
+              ]
+            },
+            item.from + '>' + item.bot.name + item.ts
+          )
+        })
+      })
+    ]
+  })
+}
+
+
 function BotsPane() {
   const { data, error, isLoading, refetch } = useRoster()
   const gatewayState = useValue(host.state.gateway)
@@ -5948,6 +6283,11 @@ function BotsPane() {
     return activityOf(b) - activityOf(a)
   })
   const filteredRoster = filterBots(roster, allMeta, query)
+  const unread = useValue($botUnread)
+  const openLoops = openLoopsByBot(filteredRoster)
+  const summary = fleetSummary(filteredRoster, allMeta, unread, activeProfile, gatewayState === 'busy')
+  const firstNeed = needsYouOf(filteredRoster, unread)[0]
+  const allPaused = roster.length > 0 && roster.every(bot => allMeta[bot.name]?.paused)
 
   if (live) {
     $lastRoster.set(roster)
@@ -6055,6 +6395,86 @@ function BotsPane() {
             })
           })
         : null,
+      filteredRoster.length || summary.needYou || summary.working || summary.unread || summary.active || summary.paused
+        ? jsxs('div', {
+            className:
+              'mx-2.5 mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md border border-(--ui-stroke-secondary) bg-(--chrome-action-hover) px-2 py-1',
+            children: [
+              summary.needYou && firstNeed
+                ? jsx('button', {
+                    type: 'button',
+                    className:
+                      'flex cursor-pointer items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-semibold text-amber-400 transition-colors hover:opacity-80',
+                    title: 'Jump to the newest bot-to-bot reply waiting for you',
+                    onClick: () => void openBotChat(firstNeed.bot, allMeta[firstNeed.bot.name] || {}),
+                    children: [jsx('span', { className: 'size-1.5 rounded-full bg-amber-400' }), `${summary.needYou} need you`]
+                  })
+                : null,
+              summary.working
+                ? jsx('span', {
+                    className:
+                      'flex items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-semibold text-(--ui-accent,#4f9cf9)',
+                    title: 'Running a turn right now',
+                    children: [
+                      jsx('span', { className: 'hermes-bots-pulse size-1.5 rounded-full bg-(--ui-accent,#4f9cf9)' }),
+                      `${summary.working} working`
+                    ]
+                  })
+                : null,
+              summary.unread
+                ? jsx('span', {
+                    className:
+                      'flex items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium text-(--ui-text-secondary)',
+                    title: 'Bots with new messages you have not opened',
+                    children: [jsx('span', { className: 'size-1.5 rounded-full bg-(--ui-accent,#4f9cf9)' }), `${summary.unread} new`]
+                  })
+                : null,
+              summary.active
+                ? jsx('span', {
+                    className:
+                      'flex items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium text-(--ui-text-tertiary)',
+                    title: 'Wrote something in the last 90 seconds',
+                    children: [
+                      jsx('span', { className: 'size-1.5 rounded-full bg-(--ui-text-quaternary)' }),
+                      `${summary.active} active`
+                    ]
+                  })
+                : null,
+              summary.paused
+                ? jsx('span', {
+                    className:
+                      'flex items-center gap-1 rounded-full bg-(--chrome-action-hover) px-1.5 py-px text-[0.625rem] font-medium text-(--ui-text-tertiary)',
+                    title: 'Paused — handoffs blocked',
+                    children: ['⏸', `${summary.paused} paused`]
+                  })
+                : null,
+              roster.length
+                ? jsx('button', {
+                    type: 'button',
+                    className:
+                      'ml-auto flex cursor-pointer items-center gap-1 rounded-full px-1.5 py-px text-[0.625rem] font-medium transition-colors hover:opacity-80 ' +
+                      (allPaused ? 'text-amber-400' : 'text-(--ui-text-quaternary)'),
+                    title: allPaused
+                      ? 'Resume every bot — handoffs flow again'
+                      : 'Pause every bot — blocks all handoff dispatch',
+                    onClick: () => {
+                      for (const bot of roster) {
+                        saveBotMeta(bot.name, { paused: !allPaused })
+                      }
+                      host.notify({
+                        kind: 'info',
+                        message: allPaused
+                          ? 'All bots resumed — handoffs flow again'
+                          : 'All bots paused — handoffs blocked until you resume'
+                      })
+                    },
+                    children: [allPaused ? '▶' : '⏸', allPaused ? 'resume all' : 'pause all']
+                  })
+                : null
+            ]
+          })
+        : null,
+      jsx(NeedsYou, { roster: filteredRoster, unread, meta: allMeta }),
       staleNotice
         ? jsx('div', {
             className: 'mx-2.5 mb-1 rounded-md bg-(--chrome-action-hover) px-2 py-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
@@ -6138,7 +6558,7 @@ function BotsPane() {
                           }, `group:${section.group}`)
                         : null,
                       ...section.bots.map(bot =>
-                        jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping }, bot.name)
+                        jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping, openLoops: openLoops[bot.name] || 0 }, bot.name)
                       )
                     ])
                   })
@@ -6423,6 +6843,15 @@ export default {
           // stdout for the sender to relay.
           const activeMeta = $botMeta.get()[active]
           const senderName = displayName({ name: active, title: activeMeta?.title }, activeMeta)
+
+          if (activeMeta?.paused) {
+            host.notify({
+              kind: 'info',
+              title: `${displayName({ name: active, title: activeMeta?.title }, activeMeta)} is paused`,
+              message: 'Handoff not dispatched — resume the bot in the Bots pane to send tasks.'
+            })
+            return draft
+          }
           // The command below runs verbatim in the active agent's terminal:
           // sender titles are free text (and sync from ui_meta), and profile
           // names come from the gateway — every interpolated value must stay
@@ -6430,7 +6859,7 @@ export default {
           const note =
             '\n\n[@mention handoff — for each mentioned agent (' + mentioned.map(botHandle).join(', ') + '): ' +
             'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim (avoid double quotes in your composed message). Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
-            mentioned.map(n => '`hermes -p ' + shellQuote(n) + ' chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + shellDoubleQuote(senderName) + ' (@' + shellDoubleQuote(botHandle(active)) + '): <your composed message>"`').join('\n') +
+            mentioned.map(n => '`' + rawChatCommand(botHandle(active), n, '<your composed message>') + '`').join('\n') +
             '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. If it fails with "No session found matching \'Bot Chat\'", send once without the -c flag, then run `hermes -p <agent> sessions rename <session_id from the output> "Bot Chat"`. ' +
             'Relay the reply back to the user, attributed to that agent.]'
 
