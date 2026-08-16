@@ -20,7 +20,10 @@ function load({ locale = 'en-US' } = {}) {
   const stored = []
 
   const host = {
-    state: { profile: { get: () => 'default', listen: () => undefined } },
+    state: {
+      profile: { get: () => 'default', listen: () => undefined },
+      gateway: { get: () => 'open', listen: () => undefined }
+    },
     notify: () => undefined,
     request: (method, params) => {
       calls.push({ method, params })
@@ -39,9 +42,11 @@ function load({ locale = 'en-US' } = {}) {
   }
 
   const source = pluginSource
-    .replace(/^import\s+\{[\s\S]*?\}\s+from '@hermes\/plugin-sdk'\r?\n/m, '')
-    .replace(/^import .* from 'react'\r?\n/m, '')
-    .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
+    .replace(/^import\s+\*\s+as\s+sdk\s+from '@hermes\/plugin-sdk'\s*\n/m, '')
+    .replace(/^import\s+\{[\s\S]*?\}\s+from '@hermes\/plugin-sdk'\s*\n/m, '')
+    .replace(/^const \{\s*McpTab,\s*ToolsetConfigPanel\s*\}\s*=\s*sdk\s*\n/m, '')
+    .replace(/^import .* from 'react'\s*\n/m, '')
+    .replace(/^import .* from 'react\/jsx-runtime'\s*\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat('\nglobalThis.__cost = { isFreeModel, botCostState, buildPricingByModel, userCurrencySymbol, saveBotMeta };')
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
