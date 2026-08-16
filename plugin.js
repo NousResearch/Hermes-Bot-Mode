@@ -2950,7 +2950,7 @@ function userCurrencySymbol() {
 function costBadge(costState, model, provider) {
   if (costState === 'paid') {
     return jsx('span', {
-      className: 'shrink-0 text-[0.8125rem] font-semibold leading-none text-(--ui-green)',
+      className: 'shrink-0 text-[0.875rem] font-semibold leading-none text-[#10b981]',
       title: `${model} via ${provider || 'unknown provider'} — paid LLM`,
       'aria-label': 'paid LLM',
       children: userCurrencySymbol()
@@ -2958,7 +2958,7 @@ function costBadge(costState, model, provider) {
   }
   if (costState === 'local') {
     return jsx('span', {
-      className: 'shrink-0 text-[0.8125rem] leading-none',
+      className: 'shrink-0 text-[0.875rem] leading-none',
       title: `${model} via ${provider || 'unknown provider'} — locally hosted (no LLM cost)`,
       'aria-label': 'locally hosted LLM',
       children: '🆓'
@@ -2966,7 +2966,7 @@ function costBadge(costState, model, provider) {
   }
   if (costState === 'free') {
     return jsx('span', {
-      className: 'shrink-0 text-[0.8125rem] leading-none',
+      className: 'shrink-0 text-[0.875rem] leading-none',
       title: `${model} via ${provider || 'unknown provider'} — free LLM`,
       'aria-label': 'free LLM',
       children: '🆓'
