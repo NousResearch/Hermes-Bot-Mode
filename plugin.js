@@ -2412,7 +2412,7 @@ function updateGroupChat(group, mutate) {
     const durable = {}
 
     for (const [name, room] of Object.entries(all)) {
-      durable[name] = { log: room.log, watermarks: room.watermarks }
+      durable[name] = { log: room.log, watermarks: room.watermarks, sessions: room.sessions || {} }
     }
 
     Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable)).catch(() => undefined)
@@ -2439,19 +2439,121 @@ function appendGroupChatEntry(group, from, text) {
   return entry
 }
 
-/** One member turn: run the member's own per-group Hermes session with the
- *  room delta as the prompt, capture the reply verbatim. cli.exec argv form —
- *  no shell string composition, so hostile titles/names can't inject. */
-async function runGroupChatMemberTurn(group, member, prompt) {
-  const result = await host.request('cli.exec', {
-    argv: ['-p', member.name, 'chat', '--in', '~', '-c', `Group: ${group}`, '-Q', '-q', prompt]
-  })
+/** Ensure the member's per-group session exists and return a LIVE runtime
+ *  session id for it. Gateway-native: session.create mints the session
+ *  (lazy until its first message), session.resume by stored id — or by
+ *  title, which also covers rehydrated rooms whose sid was lost — reopens
+ *  it after restarts. */
+async function ensureGroupChatSession(group, memberName) {
+  const title = `Group: ${group}`
+  const room = $groupChats.get()[group] || {}
+  const known = room.sessions && room.sessions[memberName]
 
-  if (result?.blocked || result?.code !== 0) {
+  // Try resuming what we know (stored sid first, then title lookup).
+  for (const target of [known, title]) {
+    if (!target || target === true) {
+      continue
+    }
+
+    try {
+      const res = await host.request('session.resume', {
+        session_id: target,
+        profile: memberName,
+        omit_messages: true
+      })
+
+      if (res?.session_id) {
+        return { runtime: res.session_id, stored: res.session_key || known }
+      }
+    } catch {
+      /* fall through to create */
+    }
+  }
+
+  const created = await host.request('session.create', {
+    profile: memberName,
+    title,
+    ...($hideBotChats.get() ? { hidden: true } : {})
+  })
+  const stored = created?.stored_session_id || null
+
+  if (stored) {
+    updateGroupChat(group, r => {
+      r.sessions = { ...(r.sessions || {}), [memberName]: stored }
+      return r
+    })
+  }
+
+  return { runtime: created?.session_id || null, stored }
+}
+
+const GROUP_TURN_TIMEOUT_MS = 180000
+const GROUP_TURN_POLL_MS = 2000
+
+/** One member turn, gateway-native: submit the room delta as a prompt into
+ *  the member's per-group session, then poll the session until a NEW
+ *  assistant message lands (or timeout → pass). No shell composition. */
+async function runGroupChatMemberTurn(group, member, prompt) {
+  const { runtime, stored } = await ensureGroupChatSession(group, member.name)
+
+  if (!runtime) {
     return null
   }
 
-  return String(result?.output || '').trim()
+  // Baseline: how many messages exist before our submit.
+  let before = 0
+
+  try {
+    const pre = await host.request('session.resume', {
+      session_id: stored || runtime,
+      profile: member.name
+    })
+    before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
+  } catch {
+    /* lazy session — zero messages */
+  }
+
+  await host.request('prompt.submit', { session_id: runtime, text: prompt })
+
+  const deadline = Date.now() + GROUP_TURN_TIMEOUT_MS
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, GROUP_TURN_POLL_MS))
+
+    let state = null
+
+    try {
+      state = await host.request('session.resume', {
+        session_id: stored || runtime,
+        profile: member.name
+      })
+    } catch {
+      continue
+    }
+
+    const messages = Array.isArray(state?.messages) ? state.messages : []
+    const done = !state?.inflight && !state?.running
+
+    if (messages.length > before && done) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]
+
+        if (msg?.role === 'assistant') {
+          const text = typeof msg.content === 'string'
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content.map(p => (typeof p === 'string' ? p : p?.text || '')).join('')
+              : msg?.text || ''
+
+          return String(text).trim()
+        }
+      }
+
+      return null
+    }
+  }
+
+  return null // timeout — reads as a pass
 }
 
 /** Drive one bounded round-robin room turn. Serial — one member at a time.
@@ -6179,6 +6281,7 @@ export default {
                 rooms[name] = {
                   log: room.log,
                   watermarks: room.watermarks && typeof room.watermarks === 'object' ? room.watermarks : {},
+                  sessions: room.sessions && typeof room.sessions === 'object' ? room.sessions : {},
                   epoch: 0,
                   running: false
                 }

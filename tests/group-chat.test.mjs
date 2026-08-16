@@ -16,6 +16,7 @@ function load(turnScript) {
     return slot
   }
   const calls = []
+  const transcripts = new Map()
   const context = {
     atom,
     setTimeout: (fn, _ms) => {
@@ -28,12 +29,23 @@ function load(turnScript) {
     document: { getElementById: () => null, createElement: () => ({}), head: { appendChild: () => undefined } },
     host: {
       request: async (method, params) => {
-        if (method === 'cli.exec') {
-          const profile = params.argv[1]
-          const prompt = params.argv[params.argv.length - 1]
-          calls.push({ profile, prompt, argv: params.argv })
-          const reply = turnScript(profile, prompt, calls.length)
-          return { blocked: false, code: 0, output: reply }
+        if (method === 'session.create') {
+          return { session_id: `rt-${params.profile}`, stored_session_id: `sid-${params.profile}`, message_count: 0, messages: [] }
+        }
+        if (method === 'session.resume') {
+          const profile = params.profile
+          const transcript = transcripts.get(profile) || []
+          return { session_id: `rt-${profile}`, messages: transcript, inflight: false, running: false }
+        }
+        if (method === 'prompt.submit') {
+          const profile = String(params.session_id).replace(/^rt-/, '')
+          const transcript = transcripts.get(profile) || []
+          transcript.push({ role: 'user', content: params.text })
+          calls.push({ profile, prompt: params.text })
+          const reply = turnScript(profile, params.text, calls.length)
+          transcript.push({ role: 'assistant', content: reply })
+          transcripts.set(profile, transcript)
+          return {}
         }
         return {}
       },
@@ -199,20 +211,21 @@ test('needs-you: a member reply mentioning @user badges the group; user send cle
   assert.equal(gc2.$groupNeedsYou.get().Escalate, false)
 })
 
-test('turn transport is argv (no shell composition) and targets the per-group session', async () => {
+test('turn transport is gateway-native (session RPCs) and hostile text rides verbatim', async () => {
   const gc = load(() => '(pass)')
 
-  gc.sendToGroupChat('Argv', [{ name: 'research', title: '' }], 'hello "there" `whoami` $(id)')
-  for (let i = 0; i < 200 && (gc.$groupChats.get().Argv || {}).running; i++) {
+  gc.sendToGroupChat('Rpc', [{ name: 'research', title: '' }], 'hello "there" `whoami` $(id)')
+  for (let i = 0; i < 200 && (gc.$groupChats.get().Rpc || {}).running; i++) {
     await new Promise(resolve => setImmediate(resolve))
   }
 
   const call = gc.calls[0]
-  assert.equal(call.argv[0], '-p')
-  assert.equal(call.argv[1], 'research')
-  assert.equal(call.argv.includes('Group: Argv'), true)
-  // Hostile text rides as a literal argv element — never a shell string.
+  assert.equal(call.profile, 'research')
+  // Hostile text is a JSON string in an RPC param — never a shell string.
   assert.equal(call.prompt.includes('hello "there" `whoami` $(id)'), true)
+  // The per-group session is created with the room title.
+  assert.match(pluginSource, /title,\n/)
+  assert.match(pluginSource, /const title = `Group: \$\{group\}`/)
 })
 
 test('log trimming keeps watermarks consistent', () => {
