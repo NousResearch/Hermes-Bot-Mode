@@ -51,8 +51,10 @@ function renderBotRow(name = 'alpha') {
     A2A_PREFIX_RE: /^$/,
     useEffect: () => undefined,
     useState: initial => [typeof initial === 'function' ? initial() : initial, () => undefined],
+    botFaceMood: () => 'idle',
+    useTurnBusy: () => false,
     host: {
-      state: { gateway: atom('open'), profile: atom('default') },
+      state: { busy: atom(false), gateway: atom('open'), profile: atom('default') },
       warmProfile: profile => warmed.push(profile),
       request: async () => ({ sessions: [] }),
       notify: () => undefined,

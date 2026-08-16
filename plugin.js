@@ -949,8 +949,8 @@ function projectFacePoint(x, y, turn, tilt, roll) {
   const r = (roll * Math.PI) / 180
   const xr = dx * Math.cos(r) - dy * Math.sin(r)
   const yr = dx * Math.sin(r) + dy * Math.cos(r)
-  const sx = 0.74 + 0.26 * Math.abs(Math.cos((turn * Math.PI) / 180))
-  const sy = 0.8 + 0.2 * Math.abs(Math.cos((tilt * Math.PI) / 180))
+  const sx = 0.58 + 0.42 * Math.abs(Math.cos((turn * Math.PI) / 180))
+  const sy = 0.7 + 0.3 * Math.abs(Math.cos((tilt * Math.PI) / 180))
   return [20 + xr * sx, 20 + yr * sy]
 }
 
@@ -968,19 +968,40 @@ function ringToPath(pts) {
   return d + 'Z'
 }
 
-/** Grok-style pose. thinking/working lean and sway. idle is a small sine. */
+/** How the head moves. Think leans and shows dots. Work bobs.
+ *  Idle is a small sway. The moves are big so a tiny roster face still reads. */
 function facePose(mood, t) {
-  if (mood === 'work') {
+  if (mood === 'think') {
     return {
-      turn: -11 + Math.sin(t * 0.48) * 8,
-      tilt: Math.sin(t * 0.42) * 8 + Math.sin(t * 1.1) * 1.6,
-      roll: Math.sin(t * 0.75) * 4.2,
-      gazeX: Math.sin(t * 0.55) * 3.6,
-      gazeY: -1.6 + Math.sin(t * 0.38) * 2,
+      turn: -18 + Math.sin(t * 0.55) * 14,
+      tilt: Math.sin(t * 0.48) * 12 + Math.sin(t * 1.35) * 3,
+      roll: Math.sin(t * 0.95) * 10,
+      gazeX: Math.sin(t * 0.7) * 3.6,
+      gazeY: -2.2 + Math.sin(t * 0.4) * 2.2,
       blink: t % 1.45 > 1.26,
-      d0: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6)),
-      d1: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 0.7)),
-      d2: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 1.4))
+      lift: Math.sin(t * 1.15) * 1.8,
+      scale: 1 + Math.sin(t * 0.95) * 0.045,
+      d0: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.4)),
+      d1: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.4 - 0.7)),
+      d2: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.4 - 1.4))
+    }
+  }
+
+  if (mood === 'work') {
+    const bob = Math.sin(t * Math.PI * 2 * 1.85)
+
+    return {
+      turn: 8 + bob * 9,
+      tilt: 5 + Math.sin(t * 2.4) * 5,
+      roll: 2 + Math.max(0, bob) * 10,
+      gazeX: Math.sin(t * 1.05) * 2.8,
+      gazeY: Math.sin(t * 0.7) * 2,
+      blink: t % 1.15 > 0.98,
+      lift: Math.max(0, bob) * 4,
+      scale: 1 - Math.max(0, bob) * 0.07,
+      d0: 0,
+      d1: 0,
+      d2: 0
     }
   }
 
@@ -991,6 +1012,8 @@ function facePose(mood, t) {
     gazeX: 0,
     gazeY: 0,
     blink: t % 3.2 > 3.02,
+    lift: 0,
+    scale: 1,
     d0: 0,
     d1: 0,
     d2: 0
@@ -1000,7 +1023,7 @@ function facePose(mood, t) {
 function paintMathFace(svg, t) {
   const mood = svg.getAttribute('data-hb-mood') || 'idle'
   const shape = svg.getAttribute('data-hb-shape') || 'circle'
-  const pose = facePose(mood, t)
+  const pose = settlePose(svg, mood, facePose(mood, t))
   const body = svg.querySelector('[data-hb-body]')
   const open = svg.querySelector('[data-hb-open]')
   const shut = svg.querySelector('[data-hb-shut]')
@@ -1045,8 +1068,48 @@ function paintMathFace(svg, t) {
     dot.setAttribute('opacity', String(o))
   })
 
-  svg.style.transform = `rotate(${pose.tilt}deg)`
-  svg.style.transformOrigin = '50% 70%'
+  const lift = pose.lift || 0
+  const scale = pose.scale == null ? 1 : pose.scale
+  svg.style.transform = `translateY(${-lift}px) rotate(${pose.tilt}deg) rotate(${pose.roll * 0.35}deg) scale(${scale})`
+  svg.style.transformOrigin = '50% 80%'
+}
+
+const POSE_KEYS = ['turn', 'tilt', 'roll', 'gazeX', 'gazeY', 'lift', 'scale', 'd0', 'd1', 'd2']
+
+function mixPose(from, to, t) {
+  const out = { ...to }
+  const k = 1 - (1 - t) * (1 - t)
+
+  for (const key of POSE_KEYS) {
+    const a = from[key]
+    const b = to[key]
+
+    if (typeof a === 'number' && typeof b === 'number') {
+      out[key] = a + (b - a) * k
+    }
+  }
+
+  return out
+}
+
+/** Blend from the last pose so a mood change does not jump. */
+function settlePose(svg, mood, pose) {
+  if (svg.__hbMood !== mood) {
+    svg.__hbMood = mood
+    svg.__hbFrom = svg.__hbPose || pose
+    svg.__hbBlend = 0
+  }
+
+  let drawn = pose
+
+  if (svg.__hbFrom && svg.__hbBlend < 1) {
+    svg.__hbBlend = Math.min(1, svg.__hbBlend + 0.08)
+    drawn = mixPose(svg.__hbFrom, pose, svg.__hbBlend)
+  }
+
+  svg.__hbPose = drawn
+
+  return drawn
 }
 
 function walkMathFaces(root, acc) {
@@ -1131,15 +1194,16 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
     })
   }
 
-  const working = mood === 'work'
+  const live = mood === 'think' || mood === 'work'
+  const thinking = mood === 'think'
   const eyeFill = isDarkColor(color) ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)'
   const ring = sampleFaceRing(shape)
-  const rest = facePose(working ? 'work' : 'idle', 0)
+  const rest = facePose(mood === 'think' || mood === 'work' ? mood : 'idle', 0)
 
   return jsxs('svg', {
     'data-bot-face': name,
     'data-hb-math': '1',
-    'data-hb-mood': working ? 'work' : 'idle',
+    'data-hb-mood': thinking ? 'think' : mood === 'work' ? 'work' : 'idle',
     'data-hb-shape': shape || 'circle',
     viewBox: '0 0 40 44',
     width: size,
@@ -1157,8 +1221,8 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
       jsxs('g', {
         'data-hb-open': '1',
         children: [
-          jsx('ellipse', { 'data-hb-el': '1', cx: 15.4, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
-          jsx('ellipse', { 'data-hb-er': '1', cx: 24.6, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('ellipse', { 'data-hb-el': '1', cx: 15.4, cy: 17.2, rx: 2.2, ry: live ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('ellipse', { 'data-hb-er': '1', cx: 24.6, cy: 17.2, rx: 2.2, ry: live ? 2.6 : 2.3, fill: eyeFill }),
           jsx('circle', { cx: 14.8, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' }),
           jsx('circle', { cx: 24, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' })
         ]
@@ -1172,7 +1236,7 @@ function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle'
         fill: 'none',
         opacity: 0
       }),
-      working
+      thinking
         ? jsxs('g', {
             children: [
               jsx('circle', { 'data-hb-dot': '1', cx: 16.4, cy: 41.2, r: 1.15, fill: color, opacity: rest.d0 }),
@@ -2818,18 +2882,33 @@ function generatedSessionTitle(session, preview) {
  *  seconds is treated as "active now" (pulsing dot in its row). */
 const ACTIVE_WINDOW_S = 90
 
-/** Bots that are working right now: the profile the gateway is running a
- *  turn for (busy), plus any bot whose last message landed inside the
- *  liveness window. Pure — output follows the input roster's order, so
- *  presence never reorders or hides the normal list. */
-function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
+/** Bots that are working right now. The focused bot while a turn is live,
+ *  plus any bot that wrote in the last ACTIVE_WINDOW_S seconds.
+ *  Keeps the input roster order. */
+function activeBots(roster, activeProfile, turnBusy, now = Date.now()) {
   return (roster || []).filter(bot => {
-    const busyTurn = bot.name === activeProfile && gatewayState === 'busy'
+    const busyTurn = bot.name === activeProfile && Boolean(turnBusy)
     const last = bot.last_session?.last_active || 0
     const inWindow = Boolean(last && now / 1000 - last < ACTIVE_WINDOW_S)
 
     return busyTurn || inWindow
   })
+}
+
+/** Think only while this bot is the focused live turn. Else idle. */
+function botFaceMood({ isActive, turnBusy }) {
+  if (isActive && turnBusy) {
+    return 'think'
+  }
+
+  return 'idle'
+}
+
+const $idleTurn = atom(false)
+
+/** True while the focused chat is working. Old desktops have no busy flag. */
+function useTurnBusy() {
+  return Boolean(useValue(host.state.busy || $idleTurn))
 }
 
 // ── bot row ──────────────────────────────────────────────────────────────────
@@ -2842,12 +2921,9 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   const { shape, color, image } = botAppearance(bot.name, meta)
   // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
   const photo = Boolean(image && !isBackfilledFacePng(image))
-  const gatewayState = useValue(host.state.gateway)
+  const turnBusy = useTurnBusy()
   const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
-  // Work pose only when this bot is actually doing something: the active
-  // profile while the gateway is busy, or a bot that wrote within the
-  // liveness window. Not every bot whenever the gateway is busy.
-  const botMood = (isActive && gatewayState === 'busy') || activeNow ? 'work' : 'idle'
+  const botMood = botFaceMood({ activeNow, isActive, turnBusy })
   const unread = Boolean(useValue($botUnread)[bot.name])
   // WHO sent the last message (bot-to-bot DM vs human) — the full stored
   // history lives in the Sessions workspace (context menu), not inline.
@@ -5630,13 +5706,10 @@ function ProfileSessionsWorkspace({ bot }) {
 
 // ── roster pane ──────────────────────────────────────────────────────────────
 
-/** "Active now" presence strip above the roster: chips for every bot that is
- *  working right now (the gateway-busy selected profile + bots whose last
- *  message landed inside the liveness window). Reuses the row avatar; each
- *  chip opens that bot's canonical Bot Chat. Omitted entirely when nothing
- *  is active, and never reorders the roster below it. */
-function ActiveNowStrip({ roster, activeProfile, gatewayState, metaByName, onOpen }) {
-  const active = activeBots(roster, activeProfile, gatewayState)
+/** Strip above the roster. Chips for the live focused turn and bots that
+ *  just wrote. Hidden when nobody is active. Does not reorder the list. */
+function ActiveNowStrip({ roster, activeProfile, turnBusy, metaByName, onOpen }) {
+  const active = activeBots(roster, activeProfile, turnBusy)
 
   if (!active.length) {
     return null
@@ -5673,7 +5746,11 @@ function ActiveNowStrip({ roster, activeProfile, gatewayState, metaByName, onOpe
               image: photo ? image : null,
               size: 24,
               name: bot.name,
-              mood: 'work'
+              mood: botFaceMood({
+                activeNow: Boolean(bot.last_session?.last_active && Date.now() / 1000 - bot.last_session.last_active < ACTIVE_WINDOW_S),
+                isActive: bot.name === activeProfile,
+                turnBusy: Boolean(turnBusy)
+              })
             }),
             jsx('span', {
               className: 'max-w-28 truncate text-xs font-medium',
@@ -5897,6 +5974,7 @@ function BotsPane() {
   const { data, error, isLoading, refetch } = useRoster()
   const gatewayState = useValue(host.state.gateway)
   const gatewayUp = gatewayState === 'open'
+  const turnBusy = useTurnBusy()
   const activeProfile = (useValue(host.state.profile) || 'default').trim() || 'default'
   const [createOpen, setCreateOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -6023,7 +6101,7 @@ function BotsPane() {
       jsx(ActiveNowStrip, {
         roster,
         activeProfile,
-        gatewayState,
+        turnBusy,
         metaByName: allMeta,
         onOpen: bot => {
           haptic('tap')
