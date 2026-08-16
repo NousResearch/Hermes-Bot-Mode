@@ -12,7 +12,7 @@ test('discardDraft deletes the materialized draft via deleteBot', () => {
   assert.match(source, /const discardDraft = \(\) => \{/)
   assert.match(source, /void deleteBot\(\{ name: draft \}\)/)
   // Ref cleared FIRST so a re-entrant cancel can't double-delete.
-  assert.match(source, /createdRef\.current = null\n\s*flightRef\.current = null\n\s*void deleteBot/)
+  assert.match(source, /createdRef\.current = null\x0d?\n\s*flightRef\.current = null\x0d?\n\s*void deleteBot/)
 })
 
 test('both cancel paths discard the draft (esc/overlay + Cancel button)', () => {
@@ -24,7 +24,7 @@ test('both cancel paths discard the draft (esc/overlay + Cancel button)', () => 
 test('successful create does NOT discard: reset clears createdRef before close', () => {
   // reset() nulls the ref, so the dialog-close discard becomes a no-op after
   // a real Create.
-  assert.match(source, /setError\(null\)\n\s*createdRef\.current = null\n\s*flightRef\.current = null\n\s*\}/)
+  assert.match(source, /setError\(null\)\x0d?\n\s*createdRef\.current = null\x0d?\n\s*flightRef\.current = null\x0d?\n\s*\}/)
 })
 
 test('renaming after materialization discards the orphaned draft', () => {

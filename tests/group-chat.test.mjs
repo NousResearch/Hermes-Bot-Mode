@@ -224,7 +224,7 @@ test('turn transport is gateway-native (session RPCs) and hostile text rides ver
   // Hostile text is a JSON string in an RPC param — never a shell string.
   assert.equal(call.prompt.includes('hello "there" `whoami` $(id)'), true)
   // The per-group session is created with the room title.
-  assert.match(pluginSource, /title,\n/)
+  assert.match(pluginSource, /title,\x0d?\n/)
   assert.match(pluginSource, /const title = `Group: \$\{group\}`/)
 })
 

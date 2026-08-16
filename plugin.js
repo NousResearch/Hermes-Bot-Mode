@@ -2852,9 +2852,137 @@ function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
   })
 }
 
+// ── paid/free LLM indicator ─────────────────────────────────────────────────
+//
+// A bot "costs money" when its configured LLM is not PROVABLY free. Free is
+// established only on positive evidence: a `:free` model suffix (OpenRouter
+// convention, used by the Nous portal too), a local serving provider, or the
+// gateway model catalog (model.options) reporting $0 in/out. Anything
+// unprovable counts as paid — the roster must never hide a cost it cannot
+// rule out (fail-closed).
+
+const FREE_PROVIDERS = new Set([
+  'lmstudio',
+  'ollama',
+  'llama.cpp',
+  'llamacpp',
+  'local',
+  'koboldcpp',
+  'vllm',
+  'text-generation-webui',
+  'jan',
+  'mlx',
+  'llamafile',
+  'gpt4all'
+])
+
+function isFreeModel(model, provider, pricingByModel) {
+  if (!model) return false
+  if (typeof model === 'string' && model.endsWith(':free')) return true
+  if (provider && FREE_PROVIDERS.has(String(provider).toLowerCase())) return true
+  if (pricingByModel) {
+    const hit = Object.prototype.hasOwnProperty.call(pricingByModel, model)
+      ? pricingByModel[model]
+      : pricingByModel[String(model).split('/').pop()]
+    if (typeof hit === 'boolean') return hit
+  }
+  return false
+}
+
+/** Per-bot cost state: 'paid' | 'free' | 'local' | 'unknown'.
+ *  'local' = the user declared the bot runs on their own hardware (bot meta
+ *  flag), which overrides every other signal. Unknown = no model configured
+ *  anywhere (nothing to charge). A bot whose own model is free but whose
+ *  delegation model is paid still counts as paid (subagents run under
+ *  delegation). */
+function botCostState(bot, { pricingByModel, defaultModel, local } = {}) {
+  if (local) return 'local'
+  const model = bot.model || defaultModel || ''
+  if (!model) return 'unknown'
+  const provider = bot.provider || ''
+  if (bot.delegation_model && !isFreeModel(bot.delegation_model, bot.delegation_provider, pricingByModel)) {
+    return 'paid'
+  }
+  return isFreeModel(model, provider, pricingByModel) ? 'free' : 'paid'
+}
+
+/** Flatten model.options pricing into modelId → free bool. */
+function buildPricingByModel(modelOptions) {
+  const map = {}
+  for (const provider of modelOptions?.providers || []) {
+    const pricing = provider?.pricing
+    if (pricing && typeof pricing === 'object') {
+      for (const [modelId, info] of Object.entries(pricing)) {
+        if (info && typeof info === 'object' && typeof info.free === 'boolean') {
+          map[modelId] = info.free
+        }
+      }
+    }
+  }
+  return map
+}
+
+const REGION_CURRENCY = {
+  US: '$', GB: '£', IE: '€', DE: '€', FR: '€', ES: '€', IT: '€', NL: '€',
+  AT: '€', BE: '€', FI: '€', PT: '€', GR: '€', PL: 'zł', CZ: 'Kč', SE: 'kr',
+  NO: 'kr', DK: 'kr', CH: 'CHF', CA: 'CA$', AU: 'A$', NZ: 'NZ$', JP: '¥',
+  CN: '¥', KR: '₩', IN: '₹', MX: 'MX$', BR: 'R$', TR: '₺', IL: '₪',
+  SG: 'S$', HK: 'HK$', TW: 'NT$', TH: '฿', ID: 'Rp', MY: 'RM', PH: '₱',
+  VN: '₫', ZA: 'R', RU: '₽'
+}
+
+/** The user's official currency symbol, from the app/OS locale. Falls back
+ *  to $ when the locale is unknown or unavailable. */
+function userCurrencySymbol() {
+  try {
+    const locale = (typeof navigator !== 'undefined' && navigator.language) || 'en-US'
+    const region = String(locale.split('-')[1] || 'US').toUpperCase()
+    return REGION_CURRENCY[region] || '$'
+  } catch {
+    return '$'
+  }
+}
+
+/** Small roster badge: the user's currency symbol when the bot's LLM costs
+ *  money, 🆓 when provably free or declared locally hosted, nothing when
+ *  unclassifiable. The title always names the exact model + provider so a
+ *  badge is never a mystery. */
+function costBadge(costState, model, provider) {
+  if (costState === 'paid') {
+    return jsx('span', {
+      className: 'shrink-0 text-[0.875rem] font-semibold leading-none',
+      // Inline color: the app's plugin class pipeline doesn't generate
+      // arbitrary `text-[#hex]` utilities, so theme/scan-dependent classes
+      // would fall back to inherited gray. TrendSaaS brand emerald (#10b981)
+      // is stable in both light and dark palettes.
+      style: { color: '#10b981' },
+      title: `${model} via ${provider || 'unknown provider'} — paid LLM`,
+      'aria-label': 'paid LLM',
+      children: userCurrencySymbol()
+    })
+  }
+  if (costState === 'local') {
+    return jsx('span', {
+      className: 'shrink-0 text-[0.875rem] leading-none',
+      title: `${model} via ${provider || 'unknown provider'} — locally hosted (no LLM cost)`,
+      'aria-label': 'locally hosted LLM',
+      children: '🆓'
+    })
+  }
+  if (costState === 'free') {
+    return jsx('span', {
+      className: 'shrink-0 text-[0.875rem] leading-none',
+      title: `${model} via ${provider || 'unknown provider'} — free LLM`,
+      'aria-label': 'free LLM',
+      children: '🆓'
+    })
+  }
+  return null
+}
+
 // ── bot row ──────────────────────────────────────────────────────────────────
 
-function BotRow({ bot, onDelete, onEdit, onGroup }) {
+function BotRow({ bot, onDelete, onEdit, onGroup, defaultModel = '' }) {
   const activeProfile = useValue(host.state.profile)
   const meta = useValue($botMeta)[bot.name]
   const last = bot.last_session
@@ -2917,6 +3045,17 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     }
   }
 
+  // Paid/free LLM badge: free requires positive evidence (:free suffix,
+  // local provider, or catalog price $0); anything unprovable shows the
+  // user's currency symbol. A user-declared "locally hosted" flag (bot
+  // meta) overrides everything.
+  const modelOptions = useModelOptions()
+  const costState = botCostState(bot, {
+    pricingByModel: buildPricingByModel(modelOptions.data),
+    defaultModel,
+    local: Boolean(meta?.local)
+  })
+
   const row = jsxs('button', {
     type: 'button',
     onPointerEnter: warm,
@@ -2951,6 +3090,7 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
                     className: 'truncate text-[0.8125rem] font-medium',
                     children: displayName(bot, meta)
                   }),
+                  costBadge(costState, bot.model || defaultModel, bot.provider),
                   showsHandle(bot.name, meta)
                     ? jsx('span', {
                         className: 'shrink-0 font-mono text-[0.6875rem] text-(--ui-text-quaternary)',
@@ -3275,6 +3415,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
   const [loaded, setLoaded] = useState(false)
   const [unsupported, setUnsupported] = useState(false)
   const [skillFilter, setSkillFilter] = useState('')
+  const { data: modelOptions } = useModelOptions()
 
   if (!loaded) {
     setLoaded(true)
@@ -3396,6 +3537,34 @@ function AdvancedProfileConfig({ bot, state, setState }) {
       jsx(ModelPicker, {
         value: { provider: state.provider, model: state.model },
         onChange: patch => setState(prev => ({ ...prev, dirtyModel: true, ...patch }))
+      }),
+      jsx('div', {
+        className: 'flex items-center gap-1.5 pl-0.5',
+        children: state.model
+          ? costBadge(
+              botCostState(
+                { model: state.model, provider: state.provider },
+                { pricingByModel: buildPricingByModel(modelOptions), local: Boolean(state.local) }
+              ),
+              state.model,
+              state.provider
+            )
+          : jsx('span', {
+              className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+              children: 'Inherits the launch profile model'
+            })
+      }),
+      jsx('label', {
+        className: 'flex cursor-pointer items-center gap-2 pl-0.5 text-xs text-(--ui-text-secondary)',
+        children: [
+          jsx(Checkbox, {
+            checked: Boolean(state.local),
+            onCheckedChange: value => setState(prev => ({ ...prev, dirtyLocal: true, local: Boolean(value) }))
+          }),
+          jsx('span', {
+            children: 'Locally hosted — runs on my own hardware (no LLM cost)'
+          })
+        ]
       }),
       labeled(
         `Skills (${enabledSkills}/${state.skills.length} enabled)`,
@@ -3823,11 +3992,13 @@ function emptyAdvancedState() {
     skills: [],
     toolsets: [],
     mcp: [],
+    local: false,
     dirtyModel: false,
     dirtySoul: false,
     dirtySkills: false,
     dirtyToolsets: false,
-    dirtyMcp: false
+    dirtyMcp: false,
+    dirtyLocal: false
   }
 }
 
@@ -3927,7 +4098,7 @@ function EditProfileDialog({ bot, open, onClose }) {
       setDescription(bot.description || '')
       setBusy(false)
       setAdvanced(false)
-      setAdv(emptyAdvancedState())
+      setAdv({ ...emptyAdvancedState(), local: Boolean(meta?.local) })
     }
   }
 
@@ -3987,6 +4158,12 @@ function EditProfileDialog({ bot, open, onClose }) {
         advancedFailed = true
         host.notifyError(err, 'Advanced configuration failed')
       }
+    }
+
+    // User-declared "locally hosted" flag — persists via bot meta (local
+    // storage + server ui_meta), same path as the on/off toggle.
+    if (adv.dirtyLocal) {
+      saveBotMeta(bot.name, { local: adv.local })
     }
 
     if (!advancedFailed && !lookFailed) {
@@ -5968,6 +6145,9 @@ function BotsPane() {
     return activityOf(b) - activityOf(a)
   })
   const filteredRoster = filterBots(roster, allMeta, query)
+  // A bot without its own model inherits the launch profile's — classify
+  // against that so "inherit" rows still show the true cost state.
+  const defaultModel = (roster.find(b => b.is_default) || {}).model || ''
 
   if (live) {
     $lastRoster.set(roster)
@@ -6158,7 +6338,7 @@ function BotsPane() {
                           }, `group:${section.group}`)
                         : null,
                       ...section.bots.map(bot =>
-                        jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping }, bot.name)
+                        jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping, defaultModel }, bot.name)
                       )
                     ])
                   })

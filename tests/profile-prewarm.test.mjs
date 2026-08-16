@@ -44,6 +44,11 @@ function renderBotRow(name = 'alpha') {
     displayName: bot => bot.name,
     duplicateBot: async () => `${name}-copy`,
     haptic: () => undefined,
+    // Paid/free badge helpers referenced inside BotRow.
+    useModelOptions: () => ({ data: undefined }),
+    botCostState: () => 'free',
+    buildPricingByModel: () => ({}),
+    costBadge: () => null,
     // #49 session-aware-row helpers referenced inside BotRow.
     previewKind: () => ({ fromBot: false, sender: null }),
     generatedSessionTitle: () => null,
