@@ -2719,6 +2719,7 @@ function singleFlight(ref, start) {
  *  breaking @mentions for customized bots (@wesleysimplicio, #16). */
 function messagingProtocolSection(name, roster) {
   const teammates = (roster || []).filter(b => b.name !== name)
+  const handle = botHandle(name)
 
   return [
     '## Messaging other agents',
@@ -2729,7 +2730,7 @@ function messagingProtocolSection(name, roster) {
     'into it, like a DM. To message a teammate, run:',
     '',
     '```',
-    'hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + name + ' (@' + name + '): your message"',
+    'hermes -p <agent-name> chat --in ~ -c "Bot Chat" -Q -q "Message from \uD83E\uDD16 ' + handle + ' (@' + handle + '): your message"',
     '',
     'Run the send with background=true and notify_on_complete=true on the',
     'terminal tool, then finish your turn — the reply arrives later as a',
@@ -2738,7 +2739,7 @@ function messagingProtocolSection(name, roster) {
     '',
     '(`--in ~ -c "Bot Chat"` resumes their canonical conversation in the home',
     'workspace. `-Q` keeps output clean. Always open with the',
-    '"Message from \uD83E\uDD16 ' + name + ' (@' + name + '):" prefix so they know',
+    '"Message from \uD83E\uDD16 ' + handle + ' (@' + handle + '):" prefix so they know',
     'who is talking (the @handle lets the app show your avatar to them).',
     'Their reply prints to stdout — relay the relevant part back to the',
     'user, and say which agent it came from. In the rare case the target',
@@ -2754,7 +2755,7 @@ function messagingProtocolSection(name, roster) {
     '"tell <name> ...", that is a handoff: message that agent, wait for the',
     'reply, and report back.',
     '',
-    'The roster grows over time — run `hermes profiles list` for the LIVE',
+    'The roster grows over time — run `hermes profile list` for the LIVE',
     'teammate list before a handoff. Teammates when you were created:',
     ...(teammates.length
       ? teammates.map(b => `- \`${b.name}\`${b.description ? ` — ${b.description}` : ''}`)
@@ -2762,11 +2763,65 @@ function messagingProtocolSection(name, roster) {
   ].join('\n')
 }
 
+/** True when SOUL.md already carries the Bot Mode handoff section.
+ *  #16 appends this at create-time; pre-existing profiles (especially
+ *  `default`) never went through composeSoul and silently lack it. */
+function hasMessagingProtocol(soul) {
+  return /(^|\n)## Messaging other agents(\s|$)/.test(soul || '')
+}
+
+/** Idempotent: append the protocol once, never duplicate a custom SOUL
+ *  that already has it (clone-from-default after a backfill, Edit save). */
+function ensureMessagingProtocol(soul, name, roster) {
+  const text = (soul || '').trim()
+  if (hasMessagingProtocol(text)) return text
+  const section = messagingProtocolSection(name, roster)
+  return text ? text + '\n\n' + section : section
+}
+
+const soulProtocolChecked = new Set()
+const soulProtocolInflight = new Set()
+
+/** One-shot per profile per session: if an existing SOUL has no protocol,
+ *  append it. This is the install-time fix for default / pre-Bot-Mode
+ *  personas that #16 never touched. Never overwrites identity text. */
+function backfillMessagingProtocol(roster) {
+  for (const bot of roster || []) {
+    const name = bot && bot.name
+    if (!name || soulProtocolChecked.has(name) || soulProtocolInflight.has(name)) {
+      continue
+    }
+
+    soulProtocolInflight.add(name)
+    host
+      .request('profiles.describe', { name })
+      .then(res => {
+        const soul = (res && res.soul) || ''
+        if (hasMessagingProtocol(soul)) {
+          soulProtocolChecked.add(name)
+          return null
+        }
+        return host
+          .request('profiles.configure', { name, soul: ensureMessagingProtocol(soul, name, roster) })
+          .then(() => {
+            soulProtocolChecked.add(name)
+          })
+      })
+      .catch(() => {
+        // Older gateway or a one-off describe/configure miss — do not hammer.
+        soulProtocolChecked.add(name)
+      })
+      .finally(() => {
+        soulProtocolInflight.delete(name)
+      })
+  }
+}
+
 /** SOUL.md for a new bot: identity (or the user's custom SOUL) + the
  *  messaging protocol, which ALWAYS ships. */
 function composeSoul({ name, title, description, roster, customSoul }) {
   if (customSoul && customSoul.trim()) {
-    return customSoul.trim() + '\n\n' + messagingProtocolSection(name, roster)
+    return ensureMessagingProtocol(customSoul, name, roster)
   }
 
   const lines = [
@@ -3837,7 +3892,7 @@ async function applyAdvancedConfig(bot, state) {
   const applied = {}
 
   if (state.dirtySoul) {
-    payload.soul = state.soul
+    payload.soul = ensureMessagingProtocol(state.soul, bot, $lastRoster.get())
   }
 
   if (state.dirtyModel) {
@@ -5974,6 +6029,7 @@ function BotsPane() {
     mergeServerMeta(live)
     pullServerAvatars(live)
     trackInboundActivity(live)
+    backfillMessagingProtocol(live)
   }
 
   const staleNotice = error && !live && roster.length

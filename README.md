@@ -21,7 +21,7 @@ A **desktop-app plugin** for [Hermes Agent](https://github.com/NousResearch/herm
 - **Delete Profile** (right-click) — permanently remove a bot after the same destructive confirmation used by Hermes Desktop's profile menu. The default profile cannot be deleted.
 - **Avatars** — cute geometric faces (7 shapes × 10 colors with blinking eyes that scan while the bot works), an uploaded image, an AI-generated portrait (when an image backend is configured), or a pixel **pet** companion that bounces beside the avatar while the bot is busy.
 - **Routines pane** — recurring tasks per bot, backed by Hermes cron. "Summarize my inbox every morning" lives next to the bot that does it. Runs land in the bot's own chat history.
-- **Bot-to-bot messaging** — every bot has a persistent **Bot Chat** conversation. Bots message each other with attribution (`Message from 🤖 researcher (@researcher): ...`), and their SOUL.md teaches them the protocol, including how to reply.
+- **Bot-to-bot messaging** — every bot has a persistent **Bot Chat** conversation. Bots message each other with attribution (`Message from 🤖 researcher (@researcher): ...`), and their SOUL.md teaches them the protocol, including how to reply. Existing profiles (including `default`) that predate Bot Mode get the protocol appended on first roster load — identity text is left intact.
 - **@mentions** — type `@researcher have a look at this` in any chat and the active bot hands the message off, waits for the reply, and reports back.
 
 ## How it works
