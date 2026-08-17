@@ -4863,6 +4863,23 @@ function selectRoutineJobs(data, error, lastJobs, bot) {
   }
 }
 
+/**
+ * Why the Routines pane can be empty while the bot's cron store has jobs.
+ *
+ * The pane only shows jobs namespaced `[bot:<name>]` for the active bot. When
+ * jobs exist in the store but none carry that tag, the user is left staring at
+ * the generic empty state with no hint that cronjobs are present but hidden.
+ * Return a short explanation string in that case, or null when the store is
+ * genuinely empty (or the active bot's tagged jobs are already shown).
+ */
+function routineFilterHint(all, jobs) {
+  if (jobs.length !== 0 || !Array.isArray(all) || all.length === 0) {
+    return null
+  }
+  return 'Cronjobs exist in this profile but none are tagged for this bot. ' +
+    'Name a job "[bot:<name>] …" to show it here, or see them in Cron below.'
+}
+
 function normalizedProfileName(profile) {
   return typeof profile === 'string' ? profile.trim().toLowerCase() : ''
 }
@@ -5393,6 +5410,7 @@ function RoutinesPane() {
   const staleNotice = error && !view.live && view.all.length
     ? 'Could not refresh cronjobs. Showing the last list we had.'
     : null
+  const filterHint = routineFilterHint(view.all, jobs)
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
@@ -5473,13 +5491,15 @@ function RoutinesPane() {
                 jsx(Codicon, { name: 'calendar', className: 'text-[1.6rem] text-(--ui-text-quaternary)' }),
                 jsx('div', {
                   className: 'text-xs leading-5 text-(--ui-text-tertiary)',
-                  children: 'Cronjobs are recurring tasks this agent runs on a schedule.'
+                  children: filterHint
+                    ? filterHint
+                    : 'Cronjobs are recurring tasks this agent runs on a schedule.'
                 }),
                 jsx(Button, {
                   variant: 'secondary',
                   size: 'sm',
                   onClick: openCreate,
-                  children: 'Create Cronjob'
+                  children: filterHint ? 'Create a cronjob for this bot' : 'Create Cronjob'
                 })
               ]
             })
