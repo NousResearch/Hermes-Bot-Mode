@@ -189,6 +189,107 @@ function handleSessionsGatewayTransition() {
  *  { [botName]: { shape, color, title } } */
 const $botMeta = atom({})
 
+/** User-defined group display order (roster-level, independent of the
+ *  per-bot `group` field). Persisted via ctx.storage under 'group-order'
+ *  so it survives restarts; groups absent from the list fall back to
+ *  alphabetical order at the tail, keeping old rosters stable. */
+const $groupOrder = atom([])
+
+function saveGroupOrder(order) {
+  const next = [...order]
+  $groupOrder.set(next)
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('group-order', next)).catch(() => undefined)
+  } catch {
+    /* storage unavailable — order holds for this window only */
+  }
+}
+
+/** Move a group one slot up/down in the display order. When the group
+ *  isn't in the order yet (e.g. created before ordering existed, or just
+ *  assigned), it is first placed at its alphabetical position among the
+ *  listed groups — that adoption is always persisted. The requested
+ *  swap then happens only when the target slot is inside the list, so
+ *  boundary presses on a newly adopted group still add it to the order
+ *  without throwing it to the top/bottom. */
+function moveGroup(name, dir) {
+  const order = $groupOrder.get()
+  let idx = order.indexOf(name)
+  let next
+
+  if (idx === -1) {
+    // Adopt the group at its alphabetical position among listed groups.
+    const position = order.findIndex(g => g.localeCompare(name, undefined, { sensitivity: 'base' }) > 0)
+    idx = position === -1 ? order.length : position
+    next = [...order]
+    next.splice(idx, 0, name)
+  } else {
+    next = [...order]
+  }
+
+  const target = idx + dir
+  if (target >= 0 && target < next.length) {
+    ;[next[idx], next[target]] = [next[target], next[idx]]
+  }
+
+  saveGroupOrder(next)
+}
+
+/** Rename a group across every place the name lives: each member bot's
+ *  `group` meta field (so ui_meta sync follows), the display order, any
+ *  open group-chat room, and the needs-you badge. Returns the new name,
+ *  or null when the target is invalid (blank, unchanged, or collides
+ *  with an existing group). */
+function renameGroup(oldName, newName) {
+  const trimmed = (newName || '').trim()
+  const cleanOld = (oldName || '').trim()
+
+  if (!trimmed || trimmed === cleanOld) return null
+
+  const meta = $botMeta.get()
+  const clash = Object.values(meta).some(m => (m?.group || '').trim() === trimmed)
+  if (clash) return null
+
+  // 1) Re-tag every member bot (ui_meta sync rides saveBotMeta).
+  for (const [name, m] of Object.entries(meta)) {
+    if ((m?.group || '').trim() === cleanOld) {
+      saveBotMeta(name, { group: trimmed })
+    }
+  }
+
+  // 2) Update the display order, preserving position.
+  const order = $groupOrder.get()
+  if (order.includes(cleanOld)) {
+    saveGroupOrder(order.map(g => (g === cleanOld ? trimmed : g)))
+  }
+
+  // 3) Move any open group-chat room and its needs-you badge.
+  const rooms = $groupChats.get()
+  if (rooms[cleanOld]) {
+    const next = { ...rooms, [trimmed]: rooms[cleanOld] }
+    delete next[cleanOld]
+    $groupChats.set(next)
+    try {
+      Promise.resolve(pluginCtx?.storage?.set?.('group-chats', next)).catch(() => undefined)
+    } catch {
+      /* storage unavailable — room holds for this window only */
+    }
+  }
+
+  const needs = $groupNeedsYou.get()
+  if (needs[cleanOld]) {
+    const nextNeeds = { ...needs, [trimmed]: needs[cleanOld] }
+    delete nextNeeds[cleanOld]
+    $groupNeedsYou.set(nextNeeds)
+  }
+
+  if ($groupChatWorkspace.get() === cleanOld) {
+    $groupChatWorkspace.set(trimmed)
+  }
+
+  return trimmed
+}
+
 async function saveBotMeta(name, patch) {
   const prevMeta = $botMeta.get()[name] || {}
   const next = { ...$botMeta.get(), [name]: { ...prevMeta, ...patch } }
@@ -2195,12 +2296,14 @@ function slugify(value) {
 
 /** Partition an already-sorted roster into user-defined groups. Returns
  *  [{ group: null | name, bots }] — ungrouped bots first (no separator),
- *  then each group alphabetically (case-insensitive), preserving the
- *  roster's own ordering (pin + recency) within every section. Groups are
- *  a per-bot `group` string in bot meta, so they ride the existing
- *  ui_meta sync to every machine. Empty sections are dropped, so a group
- *  disappears when its last member leaves — no group registry to manage. */
-function groupRoster(roster, metaByName) {
+ *  then each group in `groupOrder` (when supplied), with any remaining
+ *  groups sorted alphabetically (case-insensitive) after the listed ones.
+ *  Within every section the roster's own ordering (pin + recency) is
+ *  preserved. Groups are a per-bot `group` string in bot meta, so they
+ *  ride the existing ui_meta sync to every machine. Empty sections are
+ *  dropped, so a group disappears when its last member leaves — no group
+ *  registry to manage. */
+function groupRoster(roster, metaByName, groupOrder) {
   const ungrouped = []
   const byGroup = new Map()
 
@@ -2220,7 +2323,21 @@ function groupRoster(roster, metaByName) {
 
   const sections = ungrouped.length ? [{ group: null, bots: ungrouped }] : []
 
-  for (const group of [...byGroup.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))) {
+  const ranked = []
+  const rest = []
+
+  for (const group of byGroup.keys()) {
+    if (groupOrder?.includes(group)) {
+      ranked.push(group)
+    } else {
+      rest.push(group)
+    }
+  }
+
+  ranked.sort((a, b) => groupOrder.indexOf(a) - groupOrder.indexOf(b))
+  rest.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+
+  for (const group of [...ranked, ...rest]) {
     sections.push({ group, bots: byGroup.get(group) })
   }
 
@@ -5717,6 +5834,9 @@ function GroupDialog({ bot, onClose }) {
 
   const assign = group => {
     saveBotMeta(bot.name, { group: group || null })
+    if (group && !$groupOrder.get().includes(group)) {
+      saveGroupOrder([...$groupOrder.get(), group])
+    }
     host.notify({
       kind: 'info',
       message: group
@@ -5784,6 +5904,71 @@ function GroupDialog({ bot, onClose }) {
               className: 'justify-self-start',
               onClick: () => assign(null),
               children: `Remove from “${current}”`
+            })
+          : null
+      ]
+    })
+  })
+}
+
+/** Rename an existing group. The new name must be non-blank and must not
+ *  collide with another group; renameGroup() rewrites every member bot's
+ *  meta, the display order, and any open room/badge in one pass. */
+function RenameGroupDialog({ group, onClose }) {
+  const meta = useValue($botMeta)
+  const [name, setName] = useState(group || '')
+  const trimmed = name.trim()
+  const clash = trimmed && trimmed !== group
+    ? Object.values(meta).some(m => (m?.group || '').trim() === trimmed)
+    : false
+
+  const submit = () => {
+    if (!trimmed || clash) return
+    const renamed = renameGroup(group, trimmed)
+    if (renamed) {
+      host.notify({ kind: 'success', message: `Group renamed to “${renamed}”` })
+      onClose()
+    }
+  }
+
+  return jsx(Dialog, {
+    open: Boolean(group),
+    onOpenChange: value => {
+      if (!value) {
+        onClose()
+      }
+    },
+    children: jsxs(DialogContent, {
+      className: 'max-w-sm',
+      children: [
+        jsxs(DialogHeader, {
+          children: [
+            jsx(DialogTitle, { children: 'Rename group' }),
+            jsx(DialogDescription, {
+              children: `Every bot in “${group}” moves to the new name.`
+            })
+          ]
+        }),
+        jsxs('form', {
+          className: 'flex items-center gap-1.5',
+          onSubmit: event => {
+            event.preventDefault()
+            submit()
+          },
+          children: [
+            jsx(Input, {
+              autoFocus: true,
+              placeholder: 'New group name',
+              value: name,
+              onChange: event => setName(event.target.value)
+            }),
+            jsx(Button, { type: 'submit', size: 'sm', disabled: !trimmed || clash, children: 'Rename' })
+          ]
+        }),
+        clash
+          ? jsx('p', {
+              className: 'text-xs text-(--ui-error,#e5484d)',
+              children: `A group named “${trimmed}” already exists.`
             })
           : null
       ]
@@ -5922,6 +6107,7 @@ function BotsPane() {
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
   const [grouping, setGrouping] = useState(null)
+  const [renamingGroup, setRenamingGroup] = useState(null)
   const [query, setQuery] = useState('')
   const hideBotChats = useValue($hideBotChats)
   const activityToasts = useValue($activityToasts)
@@ -5937,6 +6123,7 @@ function BotsPane() {
     }
   }, [gatewayUp, refetch])
   const allMeta = useValue($botMeta)
+  const groupOrder = useValue($groupOrder)
   // Messaging-app order: most recent activity first, where "activity" is
   // the newest of (bot created, last message in any of its sessions). A
   // freshly created bot tops the list until another bot gets a message.
@@ -6122,40 +6309,69 @@ function BotsPane() {
                   className: 'hermes-bots-roster min-h-0 flex-1',
                   children: jsx('div', {
                     className: 'grid w-full min-w-0 gap-0.5 px-1.5 pb-2',
-                    children: groupRoster(filteredRoster, allMeta).flatMap(section => [
+                    children: groupRoster(filteredRoster, allMeta, groupOrder).flatMap(section => [
                       section.group
-                        ? jsxs('div', {
-                            className: 'mt-2 flex items-center gap-2 px-1 pb-0.5 first:mt-0.5',
+                        ? jsxs(ContextMenu, {
                             children: [
-                              jsx('span', {
-                                className:
-                                  'shrink-0 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
-                                children: section.group
+                              jsx(ContextMenuTrigger, {
+                                asChild: true,
+                                children: jsxs('div', {
+                                  className: 'mt-2 flex items-center gap-2 px-1 pb-0.5 first:mt-0.5',
+                                  children: [
+                                    jsx('span', {
+                                      className:
+                                        'shrink-0 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
+                                      children: section.group
+                                    }),
+                                    jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' }),
+                                    groupNeedsYou[section.group]
+                                      ? jsx('span', {
+                                          className:
+                                            'shrink-0 rounded-full bg-(--ui-accent,#4f9cf9) px-1.5 text-[0.6rem] font-semibold text-white',
+                                          title: 'A bot in this room needs your input',
+                                          children: 'needs you'
+                                        })
+                                      : null,
+                                    section.bots.length > 1 && section.bots.length <= GROUP_CHAT_MAX_MEMBERS
+                                      ? jsx('button', {
+                                          type: 'button',
+                                          className:
+                                            'shrink-0 rounded px-1 text-[0.625rem] font-medium text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                                          title: `Open the ${section.group} group chat`,
+                                          onClick: event => {
+                                            event.stopPropagation()
+                                            $groupNeedsYou.set({ ...$groupNeedsYou.get(), [section.group]: false })
+                                            $groupChatWorkspace.set(section.group)
+                                          },
+                                          children: 'Open chat'
+                                        })
+                                      : null
+                                  ]
+                                }, `group:${section.group}`)
                               }),
-                              jsx('div', { className: 'h-px min-w-0 flex-1 bg-(--ui-stroke-secondary)' }),
-                              groupNeedsYou[section.group]
-                                ? jsx('span', {
-                                    className:
-                                      'shrink-0 rounded-full bg-(--ui-accent,#4f9cf9) px-1.5 text-[0.6rem] font-semibold text-white',
-                                    title: 'A bot in this room needs your input',
-                                    children: 'needs you'
+                              jsxs(ContextMenuContent, {
+                                children: [
+                                  jsx(ContextMenuItem, {
+                                    onSelect: () => setRenamingGroup(section.group),
+                                    children: 'Rename group…'
+                                  }),
+                                  jsx(ContextMenuSeparator, {}),
+                                  jsx(ContextMenuItem, {
+                                    disabled: groupOrder.indexOf(section.group) === 0,
+                                    onSelect: () => moveGroup(section.group, -1),
+                                    children: 'Move group up'
+                                  }),
+                                  jsx(ContextMenuItem, {
+                                    disabled:
+                                      groupOrder.indexOf(section.group) !== -1 &&
+                                      groupOrder.indexOf(section.group) === groupOrder.length - 1,
+                                    onSelect: () => moveGroup(section.group, 1),
+                                    children: 'Move group down'
                                   })
-                                : null,
-                              section.bots.length > 1 && section.bots.length <= GROUP_CHAT_MAX_MEMBERS
-                                ? jsx('button', {
-                                    type: 'button',
-                                    className:
-                                      'shrink-0 rounded px-1 text-[0.625rem] font-medium text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
-                                    title: `Open the ${section.group} group chat`,
-                                    onClick: () => {
-                                      $groupNeedsYou.set({ ...$groupNeedsYou.get(), [section.group]: false })
-                                      $groupChatWorkspace.set(section.group)
-                                    },
-                                    children: 'Open chat'
-                                  })
-                                : null
+                                ]
+                              })
                             ]
-                          }, `group:${section.group}`)
+                          }, `group-menu:${section.group}`)
                         : null,
                       ...section.bots.map(bot =>
                         jsx(BotRow, { bot, onDelete: setDeleting, onEdit: setEditing, onGroup: setGrouping }, bot.name)
@@ -6189,6 +6405,9 @@ function BotsPane() {
         }
       }),
       grouping ? jsx(GroupDialog, { bot: grouping, onClose: () => setGrouping(null) }) : null,
+      renamingGroup
+        ? jsx(RenameGroupDialog, { group: renamingGroup, onClose: () => setRenamingGroup(null) })
+        : null,
       jsx(ConfirmDialog, {
         open: Boolean(deleting),
         title: 'Delete bot and profile?',
@@ -6285,6 +6504,19 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate the persisted group display order (default: alphabetical).
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-order'))
+        .then(value => {
+          if (Array.isArray(value)) {
+            $groupOrder.set(value)
+          }
+        })
+        .catch(() => undefined)
+    } catch {
+      /* no storage — alphabetical default stays */
     }
 
     // Hydrate persisted group-chat room logs (epoch/running are runtime-only
