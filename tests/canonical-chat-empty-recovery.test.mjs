@@ -43,3 +43,47 @@ test('regression: an empty session list clears a stale pin and creates a replace
     { name: 'ops', patch: { chat: 'replacement' } }
   ])
 })
+
+test('regression: a missing pin reuses a Bot Chat instead of the newest session', async () => {
+  const opened = []
+  const runtime = loadCanonicalRecovery({
+    openSession: async id => opened.push(id),
+    request: async method => {
+      if (method === 'session.list') {
+        return {
+          sessions: [
+            { id: 'scratch-from-cli', title: 'scratch' },
+            { id: 'the-real-bot-chat', title: 'Bot Chat' }
+          ]
+        }
+      }
+      if (method === 'session.create') throw new Error('must not create')
+      return {}
+    }
+  })
+
+  assert.equal(await runtime.openBotCanonicalChat('ops', 'old-pin'), 'the-real-bot-chat')
+  assert.deepEqual(opened, ['the-real-bot-chat'])
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.saved)), [
+    { name: 'ops', patch: { chat: 'the-real-bot-chat' } }
+  ])
+})
+
+test('regression: a pin not in the last page is opened as-is when no Bot Chat title exists', async () => {
+  const opened = []
+  const runtime = loadCanonicalRecovery({
+    openSession: async id => opened.push(id),
+    request: async (method, params) => {
+      if (method === 'session.list') {
+        assert.equal(params.limit, 100)
+        return { sessions: [{ id: 'recent-0', title: 'scratch' }] }
+      }
+      if (method === 'session.create') throw new Error('must not create')
+      return {}
+    }
+  })
+
+  assert.equal(await runtime.openBotCanonicalChat('ops', 'old-pin-outside-page'), 'old-pin-outside-page')
+  assert.deepEqual(opened, ['old-pin-outside-page'])
+  assert.equal(runtime.saved.length, 0)
+})
